@@ -174,6 +174,11 @@ services:
       - GENESIS_ENABLE_P91=1
       - GENESIS_ENABLE_P94=1
       - GENESIS_ENABLE_P98=1
+      # PN34: active env-opt-in workspace-lock relaxation. P98 above auto-skips
+      # on v0.20 (UNIFORM_SINGLE_TOKEN_DECODE drift-marker false-positive — see
+      # docs/UPSTREAM.md), so PN34 is what's actually firing today. Belt+suspenders
+      # pattern matches default + long-text composes. Propagated from #82 audit.
+      - GENESIS_ENABLE_PN34_WORKSPACE_LOCK_RELAX=1
       - GENESIS_ENABLE_P99=1
       - GENESIS_ENABLE_P100=1
       - GENESIS_ENABLE_P101=1
