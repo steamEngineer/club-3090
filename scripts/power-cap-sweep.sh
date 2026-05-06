@@ -23,15 +23,20 @@
 #   Without --caps, the script reads power.min_limit and power.max_limit and
 #   generates caps at 10W increments across the entire envelope. This matches
 #   @laurimyllari's reference resolution that produced the cleanest 4090 curve.
-#   Per-card runtime estimates (~2 min/cap including bench warmup):
 #
-#     3090 (100-388W) →  30 caps  ~60 min
-#     4090 (150-450W) →  31 caps  ~62 min
-#     5090 (250-575W) →  33 caps  ~66 min
-#     A5000 (100-230W) → 14 caps  ~30 min
+#   Each cap runs a reduced bench (WARMUPS=1 RUNS=2 with 500/400 max_tokens),
+#   targeting ~30s/cap of sustained load — enough for the power sampler to
+#   collect 50+ under-load samples for a stable median. Per-card estimates:
 #
-#   Quick first-look: --step-size 20 cuts runtime in half. For zooming into
-#   a known-good region, use --caps 260,280,300 explicitly.
+#     3090 (100-388W) →  30 caps  ~15 min
+#     4090 (150-450W) →  31 caps  ~16 min
+#     5090 (250-575W) →  33 caps  ~17 min
+#     A5000 (100-230W) → 14 caps  ~7 min
+#
+#   At heavily-throttled caps (e.g. 100W on a 3090), bench runs slower and
+#   the per-cap time can stretch to ~50-60s, so total runtime is ~20 min on
+#   a typical sweep. For zooming into a known-good region, use --caps
+#   260,280,300 explicitly. For coarser sweeps, --step-size 20.
 #
 # Output:
 #   - Per-cap bench logs at /tmp/power-cap-N{wattage}.log
@@ -167,7 +172,8 @@ else
   AUTO_DERIVED=0
 fi
 NUM_CAPS=$(echo "$CAPS" | tr ',' '\n' | wc -l | tr -d ' ')
-EST_MIN=$((NUM_CAPS * 2))
+# ~30s/cap including settle + bench (1 warmup + 2 runs × 500+400 tokens).
+EST_MIN=$(( (NUM_CAPS * 30 + 59) / 60 ))
 
 echo "[setup] GPU $GPU_INDEX: $GPU_NAME ($GPU_VRAM MiB)"
 echo "[setup] power envelope: ${MIN_LIMIT}W (min) → ${STOCK_TDP}W (default) → ${MAX_LIMIT}W (max)"
@@ -179,7 +185,7 @@ else
   echo "[setup] sweep caps: $NUM_CAPS caps (user-specified)"
   echo "[setup]            $CAPS W"
 fi
-echo "[setup] estimated runtime: ~${EST_MIN} min (${NUM_CAPS} caps × ~2 min/cap including bench warmup)"
+echo "[setup] estimated runtime: ~${EST_MIN} min (${NUM_CAPS} caps × ~30s/cap; reduced bench WARMUPS=1 RUNS=2)"
 echo "[setup] reset at end: $([ $RESET -eq 1 ] && echo yes || echo no)"
 echo
 
@@ -248,10 +254,20 @@ for CAP in "${CAP_ARRAY[@]}"; do
   SAMPLER_PID=$!
   trap "kill $SAMPLER_PID 2>/dev/null || true" EXIT
 
-  # Run canonical bench
+  # Run bench at reduced precision for sweep efficiency.
+  # Canonical bench.sh uses WARMUPS=3 RUNS=5 + 1000/800 max_tokens =
+  # 8 × (1000+800) tokens = ~14k tokens × ~10ms/token = ~2 min/cap.
+  # For sweep purposes we don't need ±0.5% TPS precision — we need the curve
+  # shape and stable under-load power readings. With WARMUPS=1 RUNS=2 +
+  # 500/400 max_tokens = 3 × 900 tokens = 2,700 tokens → ~25-35s/cap on a
+  # mid-range card, ~50s on a heavily-power-starved cap. That's enough
+  # sustained load for the sampler to collect 50+ under-load samples for
+  # a stable median. TPS std/CV will be higher (n=2) but the knee position
+  # is unaffected, which is what the sweep is for.
   LOG_FILE="/tmp/power-cap-N${CAP}.log"
   echo "[bench] running bench.sh @ ${CAP}W cap (output: $LOG_FILE; sampling power)"
-  if ! bash "$BENCH" 2>&1 | tee "$LOG_FILE" | tail -8; then
+  if ! WARMUPS=1 RUNS=2 MAX_TOKENS_NARR=500 MAX_TOKENS_CODE=400 \
+       bash "$BENCH" 2>&1 | tee "$LOG_FILE" | tail -8; then
     kill $SAMPLER_PID 2>/dev/null || true
     echo "[warn] bench.sh failed at ${CAP}W"
     continue
