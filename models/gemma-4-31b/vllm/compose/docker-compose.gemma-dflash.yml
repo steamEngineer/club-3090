@@ -121,6 +121,12 @@ services:
       - --dtype
       - bfloat16
       - --disable-custom-all-reduce
+      # max-model-len ceiling (TP=2, BF16 KV, mem-util 0.95):
+      #   32K ctx @ 0.92 → 38,339 token KV pool (shipped default — matches bench above)
+      #   48K ctx @ 0.95 → ~46,000 token KV pool (safe, ~2 GB headroom)
+      #   65K ctx @ 0.95 → 57,668 token KV pool (max practical — 65K request would partially overflow)
+      # fp8 KV would double these but is BLOCKED on Ampere (sm_86) — see header comment.
+      # Override via env: MAX_MODEL_LEN=49152 GPU_MEMORY_UTILIZATION=0.95 bash scripts/switch.sh vllm/gemma-dflash
       - --max-model-len
       - "${MAX_MODEL_LEN:-32768}"
       - --gpu-memory-utilization

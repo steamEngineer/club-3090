@@ -100,6 +100,13 @@ services:
       - --tensor-parallel-size
       - "2"
       - --disable-custom-all-reduce
+      # max-model-len ceiling (TP=2, BF16 KV):
+      #   32K ctx @ 0.92 → KV pool ~38K tokens (shipped default — matches bench above)
+      #   48K ctx @ 0.95 → KV pool ~50K tokens (safe — MTP drafter is 0.5B vs DFlash's 2.9B,
+      #                                          slightly more headroom than gemma-dflash.yml)
+      #   65K ctx @ 0.95 → KV pool ~60K tokens (max practical; 65K request partially overflows)
+      # fp8 KV blocked on Ampere — see header comment.
+      # Override: MAX_MODEL_LEN=49152 GPU_MEMORY_UTILIZATION=0.95 bash scripts/switch.sh vllm/gemma-mtp
       - --max-model-len
       - "${MAX_MODEL_LEN:-32768}"
       - --gpu-memory-utilization
