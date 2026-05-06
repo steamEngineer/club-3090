@@ -74,10 +74,55 @@ run_check() {
   if "$@"; then :; else FAILED=$((FAILED + 1)); fi
 }
 
-echo "Running STRESS / boundary test against ${URL} (model=${MODEL}, container=${CONTAINER})"
+# ---- Engine detection (parallel to verify-full.sh::detect_engine, see #87) ---
+# Used to emit engine-aware diagnostic hints in fail() messages instead of
+# always saying "Check: docker logs $CONTAINER" — meaningless to a host-build
+# llama.cpp user. Engine class is detected once at startup and cached.
+detect_engine() {
+  if curl -sf -m 3 "${URL}/props" >/dev/null 2>&1; then
+    echo "llamacpp"; return 0
+  fi
+  local fp
+  fp="$(curl -sf -m 5 "${URL}/v1/chat/completions" \
+    -H 'Content-Type: application/json' \
+    -d "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}" 2>/dev/null \
+    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('system_fingerprint','') or '')" 2>/dev/null)"
+  case "$fp" in
+    vllm-*)   echo "vllm"; return 0 ;;
+    sglang-*) echo "sglang"; return 0 ;;
+  esac
+  case "$CONTAINER" in
+    vllm-*)      echo "vllm"; return 0 ;;
+    llama-cpp-*) echo "llamacpp"; return 0 ;;
+  esac
+  echo "unknown"
+}
+ENGINE_KIND="$(detect_engine)"
+
+# Engine-aware "where to find logs" string for fail() diagnostic hints.
+# vLLM users want "docker logs $CONTAINER"; llama.cpp host-build users want
+# "stdout/stderr where you launched llama-server"; etc. Computed once.
+case "$ENGINE_KIND" in
+  vllm|sglang) LOG_CMD="docker logs ${CONTAINER} 2>&1 | tail -50" ;;
+  llamacpp)
+    if [[ "$CONTAINER" == "none" ]]; then
+      LOG_CMD="check llama-server stdout/stderr where you launched it"
+    else
+      LOG_CMD="docker logs ${CONTAINER} 2>&1 | tail -50"
+    fi ;;
+  *) LOG_CMD="check your engine's stdout/stderr or container logs" ;;
+esac
+
+echo "Running STRESS / boundary test against ${URL}"
+echo "  model=${MODEL}  container=${CONTAINER}  engine=${ENGINE_KIND}"
 echo "  This script does the heavy stuff (longctx needle ladder + ~25K-token tool prefill)."
 echo "  For the fast functional smoke (~2 min), use verify-full.sh instead."
 echo ""
+
+# Some failure-mode hints in this script are vLLM-specific (Genesis env vars,
+# club-3090 issue references, etc.). They're emitted regardless of engine but
+# generic mode shows the same actionable info to non-vLLM users; only the
+# "where to find logs" strings adapt to engine class above.
 
 # --------------------------------------------------------------------
 # 1. Long-context needle — put a secret at ~50% depth, ask for it at the end
@@ -199,10 +244,10 @@ EOF
     skip "all depths above --max-model-len (deployed=${deployed_max:-unknown}); shrink ladder or raise ctx"
   elif [[ "$any_pass" == "1" ]]; then
     fail "partial recall — some in-budget depths failed" \
-         "Attention quality degrades at longer contexts on this config OR the deployment crashed mid-test. Check docker logs."
+         "Attention quality degrades at longer contexts on this config OR the deployment crashed mid-test. Check: ${LOG_CMD}"
   else
     fail "no depth recalled the secret (all failed, none succeeded)" \
-         "Either container crashed early in the ladder or attention is broken. Check docker logs."
+         "Either container crashed early in the ladder or attention is broken. Check: ${LOG_CMD}"
   fi
 }
 run_check "longctx" check_longctx
@@ -309,16 +354,16 @@ except Exception as e:
         pass "tool prefill OK — model emitted ${tc_count} tool_call(s) (finish=${finish}, prefill survived)"
       else
         fail "HTTP 200 but empty response (text=${content_len:-0} chars, tool_calls=${tc_count:-0}, finish=${finish:-?})" \
-             "Likely silent prefill truncation. Check docker logs for warnings."
+             "Likely silent prefill truncation. Check warnings: ${LOG_CMD}"
       fi
       ;;
     500)
       fail "HTTP 500 — OOM during ~25K-token tool-response prefill" \
-           "Activation memory peak exceeded budget. Lower --max-model-len or --gpu-memory-utilization. See README 'Activation memory caveat'. Server logs: docker logs ${CONTAINER} 2>&1 | tail -50"
+           "Activation memory peak exceeded budget. Lower --max-model-len or --gpu-memory-utilization. See README 'Activation memory caveat'. Server logs: ${LOG_CMD}"
       ;;
     000)
       fail "no HTTP response (timeout or container died)" \
-           "Prefill may have hung or container OOM-killed. Check: docker logs ${CONTAINER} 2>&1 | tail -50; nvidia-smi"
+           "Prefill may have hung or container OOM-killed. Check: ${LOG_CMD}; nvidia-smi"
       ;;
     *)
       fail "unexpected HTTP ${http_code}" \
@@ -430,7 +475,7 @@ PYEOF
       ;;
     000)
       fail "no HTTP response (timeout or container died)" \
-           "Engine likely crashed. Check: docker logs ${CONTAINER} 2>&1 | tail -50"
+           "Engine likely crashed. Check: ${LOG_CMD}"
       ;;
     *)
       fail "unexpected HTTP ${http_code}" \
@@ -512,11 +557,11 @@ PYEOF
       ;;
     500)
       fail "HTTP 500 — multi-turn prefill crashed engine" \
-           "Different compile path than check #3 — assistant + tool messages reshape the prefill. May indicate a separate inductor bug or different shape of the same Cliff 1 issue. Check: docker logs ${CONTAINER} 2>&1 | tail -80"
+           "Different compile path than check #3 — assistant + tool messages reshape the prefill. May indicate a separate inductor bug or different shape of the same Cliff 1 issue. Check: ${LOG_CMD}"
       ;;
     000)
       fail "no HTTP response (timeout or container died)" \
-           "Engine likely crashed. Check docker logs."
+           "Engine likely crashed. Check: ${LOG_CMD}"
       ;;
     *)
       fail "unexpected HTTP ${http_code}" \
@@ -588,7 +633,7 @@ PYEOF
       ;;
     000)
       fail "no HTTP response (timeout or container died)" \
-           "Engine likely crashed. Check docker logs."
+           "Engine likely crashed. Check: ${LOG_CMD}"
       ;;
     *)
       fail "unexpected HTTP ${http_code}" \
@@ -654,11 +699,11 @@ PYEOF
       ;;
     500)
       fail "HTTP 500 — long-generation crashed engine" \
-           "Possible mamba state-copy bug at deeper decode positions. Check: docker logs ${CONTAINER} 2>&1 | tail -80"
+           "Possible mamba state-copy bug at deeper decode positions. Check: ${LOG_CMD}"
       ;;
     000)
       fail "no HTTP response (timeout or container died)" \
-           "Engine likely crashed during long generation. Check docker logs."
+           "Engine likely crashed during long generation. Check: ${LOG_CMD}"
       ;;
     *)
       fail "unexpected HTTP ${http_code}" \
