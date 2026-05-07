@@ -82,6 +82,25 @@ For dual-card: combined power at 330W cap each = ~660W under heavy load — veri
 
 Run `sudo bash scripts/power-cap-sweep.sh --cooling air|water|aio` on a new rig to add a row. The script auto-detects the running container/model/URL, sweeps a configurable cap range, and emits a paste-ready markdown summary at `/tmp/power-cap-summary.md`. See [`scripts/power-cap-sweep.sh`](../scripts/power-cap-sweep.sh).
 
+**Canonical cross-rig anchor command** (production-grade data — what to paste into [disc #86](https://github.com/noonghunna/club-3090/discussions/86) for a real cross-rig efficiency anchor):
+
+```bash
+sudo bash scripts/power-cap-sweep.sh \
+  --cooling air|water|aio \
+  --load-mode decode-concurrent \
+  --concurrency auto \
+  --bench-runs 3
+```
+
+Three flags matter for anchor data:
+- **`--bench-runs 3`** — medians three batches per cap. Without this, single-batch variance can be 10-30%, making adjacent-cap deltas noise rather than signal.
+- **`--concurrency auto`** — picks N via plateau-detection at the highest cap (selects the highest N where both TPS and draw improve >3% over previous N). Avoids both under-loading (smaller GPUs at default N=4 plateau early) and over-loading (concurrency contention drops TPS).
+- **`--load-mode decode-concurrent`** — surfaces the curve on cards that don't saturate at single-stream decode (5090, larger Ada/Blackwell). 3090s often work fine at default `decode-single`, but `decode-concurrent` is safer cross-class.
+
+**Default step-size is 10W.** Don't override unless you know why:
+- `--step-size 10` (default) → ~30 caps × ~30 sec/cap = ~15-20 min total. The right resolution for finding the actual knee.
+- `--step-size 50` → ~5-6 caps total. Quick smoke / single-rig sanity only — too coarse to pin down the efficiency knee for a cross-rig anchor.
+
 | GPU | Cooling | Engine | Model | Cap | Narr TPS | Code TPS | TPS/W | Source |
 |---|---|---|---|---:|---:|---:|---:|---|
 | 3090 | water | llama.cpp default | Qwen3.6 27B Q3_K_XL | 230W | 25.15 | 24.86 | 0.109 | [@syangsao #58](https://github.com/noonghunna/club-3090/issues/58#issuecomment-4388766174) |
