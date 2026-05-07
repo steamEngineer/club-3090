@@ -61,18 +61,31 @@ The user explicitly chose to operate without NVLink. Don't suggest adding one.
 
 ## Power
 
-Production target: **330W per card** is the sweet spot — peak TPS/W efficiency and only ~5% TPS loss vs unrestricted stock (~388W).
+Production target: **290W (air-cooled) / 330W (water-cooled) per card** is the sweet spot — peak TPS/W efficiency and only ~5-7% TPS loss vs unrestricted stock.
 
 Power lever:
 ```bash
 sudo nvidia-smi -pm 1            # one-time: enable persistence mode
-sudo nvidia-smi -pl 330 -i 0     # production default (recommended for both vLLM and llama.cpp)
-sudo nvidia-smi -pl 230 -i 0     # thermal-constrained / quiet — see caveat below
+sudo nvidia-smi -pl 290 -i 0     # air-cooled default (per 21-cap 10W-resolution sweep, this rig)
+sudo nvidia-smi -pl 330 -i 0     # water-cooled default (per @syangsao 3-cap data)
+sudo nvidia-smi -pl 250 -i 0     # prefill-heavy / RAG workloads — different sweet spot, see below
 ```
 
-Past 330W: diminishing returns (SM clocks saturate near 1.9 GHz on 3090s); 388W is actually *less* efficient than 330W on Qwen3.6's GDN-attention kernels.
+Past the sweet spot: diminishing returns (SM clocks saturate near 1.9 GHz on 3090s); stock TDP is *less* efficient than the sweet-spot cap on Qwen3.6's GDN-attention kernels.
 
-**Caveat — 230W on llama.cpp + GDN models is more aggressive than it looks**: cross-rig data from [@syangsao](https://github.com/noonghunna/club-3090/issues/58#issuecomment-4388766174) (1× water-cooled 3090, llama.cpp + Qwen3.6 Q3_K_XL) shows **230W costs ~34% TPS** vs stock (25 vs 38 TPS) because the chunked_gated_delta_rule kernel is genuinely compute-bound on this model, not memory-bound. On vLLM + AutoRound the same cap costs less (~10-15%) because the kernel mix is GEMM-dominated. **Recommendation**: use 330W as the default cap on either engine. Drop to 230W only if you're more thermal-constrained than perf-constrained, and expect the larger penalty on llama.cpp.
+**The "230W is the sweet spot" lore is wrong** — it traces back to early thermal-constrained recommendations and 3-cap-resolution data. Dense 10W sweeps show 230W costs ~16% efficiency vs 290W (decode) and ~4% vs 250W (prefill) on this rig. 230W is a *low-power / quiet* cap, not an efficient one. Use it only if your goal is thermal/acoustic, not perf-per-watt.
+
+**Sweet spot varies by workload class** — same card, same engine, same model:
+
+| Workload | Air-cooled 3090 sweet spot | Notes |
+|---|---:|---|
+| Decode-single (chat / IDE agent) | **290W** (0.111 TPS/W) | -7% TPS vs 370W stock for -22% wattage |
+| Decode-concurrent (multi-stream) | **290W** (0.110 TPS/W) | Same knee as decode-single — concurrency doesn't move it |
+| Prefill-heavy (RAG / long-context) | **250W** (3.617 TPS/W) | Compute-bound; the 250W cap squeezes the curve harder |
+
+Mixed workloads: pick 290W (the prefill cost at 290W is only -5% vs prefill's own 250W sweet spot, while decode at 250W loses -10% vs its 290W sweet spot — 290W is the better compromise).
+
+**Caveat — 230W on llama.cpp + GDN models is more aggressive than it looks**: cross-rig data from [@syangsao](https://github.com/noonghunna/club-3090/issues/58#issuecomment-4388766174) (1× water-cooled 3090, llama.cpp + Qwen3.6 Q3_K_XL) shows **230W costs ~34% TPS** vs stock (25 vs 38 TPS) because the chunked_gated_delta_rule kernel is genuinely compute-bound on this model, not memory-bound. On vLLM + AutoRound the same cap costs less (~10-15%) because the kernel mix is GEMM-dominated. **Recommendation**: use 290W (air) / 330W (water) as the default cap on either engine. Drop to 230W only if you're more thermal-constrained than perf-constrained, and expect the larger penalty on llama.cpp.
 
 **Cooling caveat**: the 388W stock numbers above are from a water-cooled rig (Alphacool Eiswolf 2 AIO 360mm) — that's what lets the card actually sustain full board power. On **air-cooled 3090s**, thermal throttling typically kicks in at ~80°C and drops effective power to ~310-340W under sustained decode load even with no software cap, so 388W → 330W gap mostly disappears — your "stock" was likely already 330W-equivalent. The 330W cap mainly helps liquid-cooled rigs by keeping the card cooler + quieter at near-zero perf cost; on air-cooled it's a soft no-op that just makes the throttling explicit.
 
@@ -117,6 +130,8 @@ How `decode-single` is timed (the new default since 2026-05-07):
 | 3090 | air | llama.cpp default | Qwen3.6 27B Q3_K_XL | **290W** ⭐ | 32.16 | 32.06 | **0.111** | @noonghunna (this rig, 21-cap 10W sweep, time-bounded bench) |
 | 3090 | air | llama.cpp default | Qwen3.6 27B Q3_K_XL | 370W (stock) | 34.36 | 34.26 | 0.103 | same |
 | 3090 | air | llama.cpp default | Qwen3.6 27B Q3_K_XL | 390W (max) | 36.06 | 35.96 | 0.093 | same |
+| 3090 | air | llama.cpp `decode-concurrent` N=4 | Qwen3.6 27B Q3_K_XL | **290W** ⭐ | 31.74 | 29.98 | **0.110** | @noonghunna (this rig, 21-cap, 4-stream aggregate, 8m wall) |
+| 3090 | air | llama.cpp `decode-concurrent` N=4 | Qwen3.6 27B Q3_K_XL | 370W (stock) | 34.13 | 32.46 | 0.102 | same |
 | 3090 | air | llama.cpp `prefill-heavy` (Qwen3.6-27B) | **prefill-heavy** | **250W** ⭐ | 901.07 | (n/a) | **3.617** | @noonghunna (this rig, 21-cap adaptive sweep, 5m36s) |
 | 3090 | air | llama.cpp `prefill-heavy` (Qwen3.6-27B) | **prefill-heavy** | 370W (stock) | 1044.66 | (n/a) | 3.198 | same — boost-plateau holds 326W |
 | 3090 | air | llama.cpp `prefill-heavy` (Qwen3.6-27B) | **prefill-heavy** | 390W (max) | 1096.88 | (n/a) | 2.876 | same — 381W actual draw |

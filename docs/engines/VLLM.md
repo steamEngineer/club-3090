@@ -95,13 +95,14 @@ n=3 is the empirical sweet spot. n=4 nominally hits higher TPS on code but 4th-p
 
 ```bash
 sudo nvidia-smi -pm 1            # one-time: enable persistence mode
-sudo nvidia-smi -pl 330 -i 0     # production default — peak TPS/W efficiency
-sudo nvidia-smi -pl 230 -i 0     # thermal-constrained / quiet — larger penalty on GDN models
+sudo nvidia-smi -pl 290 -i 0     # air-cooled default — peak TPS/W (per 10W-resolution sweep)
+sudo nvidia-smi -pl 330 -i 0     # water-cooled default (per @syangsao 3-cap data)
+sudo nvidia-smi -pl 230 -i 0     # thermal-constrained / quiet — NOT a sweet spot, see note
 ```
 
-330W is the sweet spot — peak TPS/W efficiency on 3090s and only ~5% TPS loss vs unrestricted stock (~388W). Past 330W: diminishing returns (SM clocks saturate near 1.9 GHz). 388W is actually *less* efficient than 330W on Qwen3.6's GDN-attention kernels.
+Sweet spot: **290W (air) / 330W (water)** — peak TPS/W efficiency on 3090s and only ~5-7% TPS loss vs unrestricted stock. Past the sweet spot: diminishing returns (SM clocks saturate near 1.9 GHz). Stock TDP is *less* efficient than the sweet-spot cap on Qwen3.6's GDN-attention kernels.
 
-**Note**: 230W on llama.cpp + Qwen3.6 costs ~34% TPS (cross-rig data from [@syangsao](https://github.com/noonghunna/club-3090/issues/58#issuecomment-4388766174)) because the GDN forward kernel is genuinely compute-bound. On vLLM the penalty is smaller (~10-15%) because the kernel mix is GEMM-dominated, but 330W is still the better default. See [docs/HARDWARE.md#power](../HARDWARE.md#power) for the full cross-rig table.
+**Note**: 230W is NOT the sweet spot — 290W is. The "230W sweet spot" lore traces back to coarse 3-cap-resolution data; the dense 10W sweep on this rig shows 230W costs ~16% efficiency vs 290W (air-cooled). 230W is a low-power / quiet cap, not a perf-per-watt one. On llama.cpp + Qwen3.6 it costs ~34% TPS (cross-rig data from [@syangsao](https://github.com/noonghunna/club-3090/issues/58#issuecomment-4388766174)) because the GDN forward kernel is genuinely compute-bound. On vLLM the penalty is smaller (~10-15%) because the kernel mix is GEMM-dominated, but 290W is still the better default. See [docs/HARDWARE.md#power](../HARDWARE.md#power) for the full cross-rig table.
 
 ### Genesis env-opt-in patches
 
