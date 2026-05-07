@@ -1,6 +1,6 @@
-"""Generate 3090 power-cap efficiency chart from @noonghunna's water-cooled rig.
+"""Generate 3090 power-cap efficiency chart from @noonghunna's air-cooled rig.
 
-Source data: 2026-05-07 sweep, dual-3090 rig (GPU 0 used), water-cooled.
+Source data: 2026-05-07 sweep, dual-3090 rig (GPU 0 used), air-cooled.
 Engine: mainline llama.cpp (ghcr.io/ggml-org/llama.cpp:server-cuda) +
 Qwen3.6-27B-UD-Q3_K_XL.gguf, single-stream decode-single.
 
@@ -116,7 +116,7 @@ ax1.set_title(
 # Subtitle
 fig.text(
     0.5, 0.92,
-    "1× 3090 water-cooled (GPU 0 of dual-3090 rig), mainline llama.cpp + Q3_K_XL GGUF, "
+    "1× 3090 air-cooled (GPU 0 of dual-3090 rig), mainline llama.cpp + Q3_K_XL GGUF, "
     "time-bounded single-stream  |  data: @noonghunna",
     ha="center", fontsize=10, color="#666",
     style="italic",

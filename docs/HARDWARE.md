@@ -114,9 +114,9 @@ How `decode-single` is timed (the new default since 2026-05-07):
 | 3090 | water | llama.cpp default | Qwen3.6 27B Q3_K_XL | 230W | 25.15 | 24.86 | 0.109 | [@syangsao #58](https://github.com/noonghunna/club-3090/issues/58#issuecomment-4388766174) |
 | 3090 | water | llama.cpp default | Qwen3.6 27B Q3_K_XL | **330W** ⭐ | 36.35 | 36.26 | 0.110 | [@syangsao #58](https://github.com/noonghunna/club-3090/issues/58#issuecomment-4388766174) |
 | 3090 | water | llama.cpp default | Qwen3.6 27B Q3_K_XL | 388W (stock) | 38.23 | 37.97 | 0.098 | [@syangsao #58](https://github.com/noonghunna/club-3090/issues/58#issuecomment-4388766174) |
-| 3090 | water | llama.cpp default | Qwen3.6 27B Q3_K_XL | **290W** ⭐ | 32.08 | 31.74 | **0.111** | @noonghunna (this rig, 18-cap 10W sweep) |
-| 3090 | water | llama.cpp default | Qwen3.6 27B Q3_K_XL | 370W (stock) | 34.46 | 34.20 | 0.103 | same |
-| 3090 | water | llama.cpp default | Qwen3.6 27B Q3_K_XL | 390W (max) | 35.84 | 35.66 | 0.092 | same |
+| 3090 | air | llama.cpp default | Qwen3.6 27B Q3_K_XL | **290W** ⭐ | 32.16 | 32.06 | **0.111** | @noonghunna (this rig, 21-cap 10W sweep, time-bounded bench) |
+| 3090 | air | llama.cpp default | Qwen3.6 27B Q3_K_XL | 370W (stock) | 34.36 | 34.26 | 0.103 | same |
+| 3090 | air | llama.cpp default | Qwen3.6 27B Q3_K_XL | 390W (max) | 36.06 | 35.96 | 0.093 | same |
 | 4090 | air | llama.cpp default | Qwen3.6 27B Q3_K_XL | **260W** ⭐ | 48.41 | 48.43 | 0.186 | [@laurimyllari #62](https://github.com/noonghunna/club-3090/discussions/62#discussioncomment-16832066) |
 | 4090 | air | llama.cpp default | Qwen3.6 27B Q3_K_XL | 280W | 49.54 | 49.10 | 0.177 | [@laurimyllari #62](https://github.com/noonghunna/club-3090/discussions/62#discussioncomment-16832066) |
 | 4090 | air | llama.cpp default | Qwen3.6 27B Q3_K_XL | 300W | 50.26 | 50.02 | 0.168 | [@laurimyllari #62](https://github.com/noonghunna/club-3090/discussions/62#discussioncomment-16832066) |
@@ -143,7 +143,7 @@ For rigs where we have full 10W-resolution sweeps, the curves below show TPS + T
 
 ![3090 + Qwen3.6-27B + llama.cpp power-cap efficiency curve (noonghunna)](img/power-cap-3090-qwen36.png)
 
-*3090 water-cooled + Qwen3.6-27B Q3_K_XL + mainline llama.cpp, 21-cap sweep 190-390W via time-bounded streaming bench (10s/direction). **Total wall: 8m12s.** Yellow callout: 290W sweet spot (0.111 TPS/W) at **78% of stock 370W TDP**. Orange-shaded zone 340-370W: firmware boost-state plateau where caps 340/350/360/370W all draw identical ~334W actual. At 380W cap, draw escapes to 361W; at 390W cap, draw reaches 388W — so the apparent "ceiling" at 334W isn't a hardware limit, it's a discrete boost-state behavior. Source script: [`img/power-cap-3090-qwen36.py`](img/power-cap-3090-qwen36.py).*
+*3090 air-cooled + Qwen3.6-27B Q3_K_XL + mainline llama.cpp, 21-cap sweep 190-390W via time-bounded streaming bench (10s/direction). **Total wall: 8m12s.** Yellow callout: 290W sweet spot (0.111 TPS/W) at **78% of stock 370W TDP**. Orange-shaded zone 340-370W: firmware boost-state plateau where caps 340/350/360/370W all draw identical ~334W actual. At 380W cap, draw escapes to 361W; at 390W cap, draw reaches 388W — so the apparent "ceiling" at 334W isn't a hardware limit, it's a discrete boost-state behavior. GPU temp peaked at 76°C at 390W cap (air-cooled, no thermal throttle within the 0-100% util envelope). Source script: [`img/power-cap-3090-qwen36.py`](img/power-cap-3090-qwen36.py).*
 
 **Cross-rig pattern**: efficiency knee falls at **~60-85% of stock TDP** across consumer Ampere/Ada — start there for a new card class and zoom in. Ada (4090) is proportionally more aggressive than Ampere (3090) — 4090 cuts 33% of stock TDP for ~7% TPS loss; 3090 cuts 15% of stock for ~5% loss.
 
