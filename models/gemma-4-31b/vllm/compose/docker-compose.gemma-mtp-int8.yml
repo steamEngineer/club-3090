@@ -157,8 +157,14 @@ services:
       - "${MAX_MODEL_LEN:-98304}"
       - --gpu-memory-utilization
       - "${GPU_MEMORY_UTILIZATION:-0.95}"
+      # max-num-seqs governs concurrency. Trade vs context: KV pool is shared
+      # across streams, so lower max-num-seqs → more per-stream context budget.
+      # Recommended overrides:
+      #   max-num-seqs=4 + max-model-len=98K  (default — multi-tenant agent)
+      #   max-num-seqs=2 + max-model-len=170K (2 concurrent long-ctx agents)
+      #   max-num-seqs=1 + max-model-len=262144 (single-stream, model native max)
       - --max-num-seqs
-      - "4"
+      - "${MAX_NUM_SEQS:-4}"
       # Vision tower: max_tokens_per_mm_item=2496 must fit in batched tokens.
       - --max-num-batched-tokens
       - "4096"
