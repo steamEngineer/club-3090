@@ -413,13 +413,20 @@ try:
                 text = ""
                 delta = choice.get("delta")
                 if isinstance(delta, dict):
-                    # Sum BOTH content and reasoning_content fields. Some llama.cpp
-                    # configs (--reasoning-format auto, or chat completions with
-                    # preserve_thinking) route thinking tokens to reasoning_content
-                    # instead of content. Counting only content silently produces
-                    # 0 TPS readings even though the GPU is generating fine. See
-                    # disc club-3090#62 (laurimyllari 4090 sweep, 2026-05-08).
-                    text = (delta.get("content") or "") + (delta.get("reasoning_content") or "")
+                    # Sum content + reasoning_content + reasoning fields. Servers route
+                    # thinking tokens to different field paths depending on config:
+                    #   delta.content           — standard OpenAI chat-completions path
+                    #   delta.reasoning_content — vLLM with --reasoning-parser qwen3 (most common)
+                    #   delta.reasoning         — some vLLM versions / DeepSeek convention
+                    # Counting only content silently produces 0 TPS readings even though
+                    # the GPU is generating fine. See:
+                    #   - disc club-3090#62 (laurimyllari 4090 sweep, 2026-05-08) — added reasoning_content
+                    #   - issue club-3090#104 (alexpolo1 dual 3090 sweep, 2026-05-08) — added reasoning
+                    text = (
+                        (delta.get("content") or "")
+                        + (delta.get("reasoning_content") or "")
+                        + (delta.get("reasoning") or "")
+                    )
                 if not text:
                     text = choice.get("text") or ""
                 if text:
@@ -541,13 +548,20 @@ try:
                 text = ""
                 delta = choice.get("delta")
                 if isinstance(delta, dict):
-                    # Sum BOTH content and reasoning_content fields. Some llama.cpp
-                    # configs (--reasoning-format auto, or chat completions with
-                    # preserve_thinking) route thinking tokens to reasoning_content
-                    # instead of content. Counting only content silently produces
-                    # 0 TPS readings even though the GPU is generating fine. See
-                    # disc club-3090#62 (laurimyllari 4090 sweep, 2026-05-08).
-                    text = (delta.get("content") or "") + (delta.get("reasoning_content") or "")
+                    # Sum content + reasoning_content + reasoning fields. Servers route
+                    # thinking tokens to different field paths depending on config:
+                    #   delta.content           — standard OpenAI chat-completions path
+                    #   delta.reasoning_content — vLLM with --reasoning-parser qwen3 (most common)
+                    #   delta.reasoning         — some vLLM versions / DeepSeek convention
+                    # Counting only content silently produces 0 TPS readings even though
+                    # the GPU is generating fine. See:
+                    #   - disc club-3090#62 (laurimyllari 4090 sweep, 2026-05-08) — added reasoning_content
+                    #   - issue club-3090#104 (alexpolo1 dual 3090 sweep, 2026-05-08) — added reasoning
+                    text = (
+                        (delta.get("content") or "")
+                        + (delta.get("reasoning_content") or "")
+                        + (delta.get("reasoning") or "")
+                    )
                 if not text:
                     text = choice.get("text") or ""
                 if text:
