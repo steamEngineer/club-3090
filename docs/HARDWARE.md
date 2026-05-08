@@ -151,6 +151,10 @@ How `decode-single` is timed (the new default since 2026-05-07):
 | 3090 | air | llama.cpp `prefill-heavy` (Qwen3.6-27B) | **prefill-heavy** | **250W** ⭐ | 906.79 | (n/a) | **3.633** | @noonghunna (this rig, 21-cap adaptive sweep, ~6m, SM 1350 MHz at sweet spot) |
 | 3090 | air | llama.cpp `prefill-heavy` (Qwen3.6-27B) | **prefill-heavy** | 370W (stock) | 1051.07 | (n/a) | 3.211 | same — SM locks at 1605-1620 MHz across 330-370W (boost-clock plateau, 327W draw) |
 | 3090 | air | llama.cpp `prefill-heavy` (Qwen3.6-27B) | **prefill-heavy** | 390W (max) | 1104.81 | (n/a) | 2.898 | same — SM 1710 MHz at 381W draw |
+| 3090 | air | llama.cpp default | **Qwen3.6 35B-A3B (MoE)** Q4_K_XL | **210W** ⭐ | 114.59 | 113.79 | **0.546** | @noonghunna (MoE shifts decode sweet spot 80W lower vs dense, SM 1290 MHz, no plateau) |
+| 3090 | air | llama.cpp default | Qwen3.6 35B-A3B (MoE) Q4_K_XL | 370W (stock) | 136.84 | 136.65 | 0.386 | same — SM climbs smoothly 1875→1905 across 340-370W (NO plateau, unlike dense) |
+| 3090 | air | llama.cpp `prefill-heavy` (35B-A3B MoE) | **prefill-heavy** | **250W** ⭐ | 2461.22 | (n/a) | **9.865** | @noonghunna (MoE prefill knee at SAME 250W as dense — workload-class converges, SM 1380 MHz) |
+| 3090 | air | llama.cpp `prefill-heavy` (35B-A3B MoE) | **prefill-heavy** | 370W (stock) | 2794.36 | (n/a) | 8.363 | same — SM locks at 1680-1710 MHz across 340-370W (boost-clock plateau detected) |
 | 4090 | air | llama.cpp default | Qwen3.6 27B Q3_K_XL | **260W** ⭐ | 48.41 | 48.43 | 0.186 | [@laurimyllari #62](https://github.com/noonghunna/club-3090/discussions/62#discussioncomment-16832066) |
 | 4090 | air | llama.cpp default | Qwen3.6 27B Q3_K_XL | 280W | 49.54 | 49.10 | 0.177 | [@laurimyllari #62](https://github.com/noonghunna/club-3090/discussions/62#discussioncomment-16832066) |
 | 4090 | air | llama.cpp default | Qwen3.6 27B Q3_K_XL | 300W | 50.26 | 50.02 | 0.168 | [@laurimyllari #62](https://github.com/noonghunna/club-3090/discussions/62#discussioncomment-16832066) |
@@ -198,7 +202,32 @@ The cross-workload pattern: **both workload classes have efficiency knee at 400W
 
 *3090 air-cooled + Qwen3.6-27B Q3_K_XL + mainline llama.cpp, 21-cap **prefill-heavy** sweep 190-390W via adaptive prompt calibration (probe TPS at 390W → size prompt for 10s prefill at high cap → 11K-token prompt used across all caps). **Total wall: ~6m.** Yellow callout: **250W sweet spot (3.633 prefill TPS/W, SM 1350 MHz)** at **68% of stock TDP** — different sweet spot than decode-single's 290W on the same rig because prefill is more compute-bound and reaches diminishing returns earlier. Boost-clock plateau visible at 330-370W: SM clock locks at 1605-1620 MHz across all five caps with identical 327W draw + 1050 prefill TPS. Plateau escapes at 380W → SM 1665 MHz, draw 355W, TPS 1080. Companion to the decode chart above; together they show **same card has different power-knee for different workload class** — and both workloads share the same firmware boost-clock plateau pattern, just with slightly different clock setpoints.*
 
-**Cross-rig pattern**: efficiency knee falls at **~60-85% of stock TDP** across consumer Ampere/Ada — start there for a new card class and zoom in. Ada (4090) is proportionally more aggressive than Ampere (3090) — 4090 cuts 33% of stock TDP for ~7% TPS loss; 3090 cuts 15% of stock for ~5% loss.
+#### Same hardware, MoE workload — sweet spot shifts 80W lower for decode
+
+Running the same sweep on **Qwen3.6-35B-A3B (MoE, 3B active params per token)** on the same 3090 GPU 0 reveals that **model architecture moves the sweet spot meaningfully**:
+
+![3090 + Qwen3.6-35B-A3B (MoE) + llama.cpp decode-single power-cap curve (noonghunna)](img/power-cap-3090-a3b-decode.png)
+
+*3090 air-cooled + Qwen3.6-35B-A3B Q4_K_XL + mainline llama.cpp, 21-cap decode-single sweep, time-bounded bench. **Total wall: ~8m.** Yellow callout: **210W sweet spot (0.546 TPS/W, SM 1290 MHz)** at **57% of stock 370W TDP** — that's **80W lower than the dense Qwen3.6-27B sweet spot at 290W** on the same hardware. Purple-shaded zone 340-370W: **NO boost-clock plateau** — SM clock climbs smoothly 1875→1890→1890→1905 across that cap range (vs the dense Qwen which locks at exactly 1560 MHz). Plateau auto-detection correctly flagged dense Qwen but did NOT flag A3B. Source script: [`img/power-cap-3090-a3b-decode.py`](img/power-cap-3090-a3b-decode.py).*
+
+![3090 + Qwen3.6-35B-A3B (MoE) + llama.cpp prefill-heavy power-cap curve (noonghunna)](img/power-cap-3090-a3b-prefill.png)
+
+*3090 air-cooled + A3B Q4_K_XL + mainline llama.cpp at -c 65536, 21-cap **prefill-heavy** sweep with adaptive prompt calibration (~31K-token prompt sized for 10s prefill at 390W cap). **Total wall: ~6m.** Yellow callout: **250W sweet spot (9.865 prefill TPS/W, SM 1380 MHz)** — **same cap as dense Qwen3.6-27B prefill** (also 250W). Boost-clock plateau auto-detected at 340-370W: SM 1680-1710 MHz, 334W draw, 2802 TPS. So both dense and MoE share the prefill plateau pattern, just at different SM clock setpoints. Source script: [`img/power-cap-3090-a3b-prefill.py`](img/power-cap-3090-a3b-prefill.py).*
+
+**Two findings from this comparison** (same hardware, same engine, same Q4-class quant, only model changes):
+
+| Workload | Dense (27B) sweet spot | MoE (A3B) sweet spot | Plateau on dense? | Plateau on MoE? |
+|---|---:|---:|:---:|:---:|
+| **Decode-single** | 290W | **210W** (–80W) | ✅ SM 1560 MHz | ❌ no plateau |
+| **Prefill-heavy** | 250W | **250W** (same) | ✅ SM 1605-1620 | ✅ SM 1680-1710 |
+
+1. **MoE shifts the decode sweet spot 80W lower** because each token only activates 3B of the 35B params — much less per-token compute than dense, so the bandwidth-bound knee fires at lower power. The prefill sweet spot stays at 250W on both because prefill is compute-bound regardless (the full per-layer matmul still happens, MoE routing only affects which experts compute).
+
+2. **Boost-clock plateau is workload-AND-model dependent**: dense decode has it (SM 1560 MHz lock 340-370W), A3B decode does not (SM climbs smoothly). The firmware's choice of operating point responds to the instruction-mix profile, not just to the cap value. Both models exhibit the plateau on prefill (where compute pressure is high), neither model exhibits it for short-prompt decode on smaller compute pressure.
+
+**Practical implication**: cap recommendations should be model-class aware. A user running A3B as their primary chat model on 3090 should cap at **210W** (49 W less than dense Qwen's 290W recommendation) and gain the same efficiency win plus a 5°C cooler operating temperature.
+
+**Cross-rig pattern**: efficiency knee falls at **~60-85% of stock TDP** across consumer Ampere/Ada — start there for a new card class and zoom in. Ada (4090) is proportionally more aggressive than Ampere (3090) — 4090 cuts 33% of stock TDP for ~7% TPS loss; 3090 cuts 15% of stock for ~5% loss. **MoE-class models lower this further**: A3B sweet spot at 57% of stock TDP for decode (vs 78% for dense on the same card).
 
 **5090 compute-saturation note**: @apnar's data shows the 5090 caps at ~430W actual draw on Qwen3.6-27B even when allowed up to 575W — the workload is compute-saturated, not power-saturated. So 400W cap delivers ~equal TPS to 575W. **Confirmed cross-workload on Gemma 4 31B + MTP**: 21-cap sweep at 10W resolution shows actual draw plateaus at ~547W beyond 530W cap (no thermal throttle, GPU temp peaked 66°C — compute / memory bandwidth limit, not thermal). **Same 400W sweet spot** despite ~5× different absolute TPS class. Pattern: the 5090 + consumer-air-cooled platform appears to have a workload-independent ~400W efficiency knee on this rig class.
 
