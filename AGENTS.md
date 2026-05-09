@@ -87,6 +87,18 @@ Filename collisions across topology dirs (e.g. `dual/dflash.yml` vs `multi4/dfla
 
 **Fine-tune exception**: model-specific fine-tunes that share the canonical model's compose directory keep the fine-tune name as a filename prefix (e.g. `dual/carnice-bf16mtp.yml`, `dual/qwopus-bf16mtp.yml` under `models/qwen3.6-27b/`). Long-term those fine-tunes can graduate to their own model directories (`models/carnice-v2-27b/`, `models/qwopus3.6-27b/`) when their variant set warrants it.
 
+#### Patches and caches stay engine-level (NOT under a topology)
+
+`<model>/<engine>/patches/` and `<model>/<engine>/cache/` sit parallel to `compose/`, not under any topology subdirectory. Three reasons:
+
+1. **Patches are reused across topologies.** `vllm-marlin-pad/` is mounted by `dual/docker-compose.yml`, `multi4/docker-compose.yml`, and every `dual/nvlink-*.yml`. Putting it under one topology dir would force the others to symlink or duplicate.
+2. **Patches are scoped by (model, engine), not by topology.** A vLLM source override doesn't change based on TP=1 vs TP=4; it's an in-container engine-internal patch that applies the same way regardless of mount layout.
+3. **Caches (`torch_compile/`, `triton/`) warm-start across composes.** Sharing them at the engine level means switching from `single/docker-compose.yml` to `single/long-text.yml` reuses the JIT'd kernels instead of recompiling.
+
+Relative paths from a compose to its sibling patches/caches: `../../patches/...` and `../../cache/...` (one `..` from `<topology>/` up to `compose/`, second `..` up to the engine dir, then `patches/` or `cache/`). All 27 shipped composes follow this.
+
+**If a future patch is genuinely topology-specific** (e.g., a kernel rewrite that only applies to TP=2), keep it at `<engine>/patches/<patch-name>/` and document the topology constraint in the patch's README. Discoverability ("one `patches/` per engine, search there") trumps the marginal benefit of a topology partition.
+
 #### Profile schema header (every compose, every time)
 
 Every compose starts with a `Profile (at-a-glance)` block declaring the (Model, Topology, Drafter, KV, Vision, Max-ctx, Genesis) tuple in structured form. Free-form description follows below the schema, not in place of it.
