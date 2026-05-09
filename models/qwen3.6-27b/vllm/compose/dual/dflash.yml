@@ -7,6 +7,7 @@
 #   Vision:    yes
 #   Max ctx:   185K
 #   Genesis:   none — DFlash drafter handles spec-decode independently
+#   Status:    ✅ Production
 #   Best for:  Peak code TPS with vision (AL ~4.4 vs MTP's 3.4) ⭐
 # ---------------------------------------------------------------------------
 # Dual-card DFlash — TP=2 + DFlash N=5 spec-decode + 185K ctx + vision.

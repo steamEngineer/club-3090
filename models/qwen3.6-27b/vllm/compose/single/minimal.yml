@@ -7,6 +7,7 @@
 #   Vision:    no
 #   Max ctx:   65K (mem-util 0.95)
 #   Genesis:   none — bare vLLM, isolation control
+#   Status:    ✅ Production
 #   Best for:  Debugging baseline / 20 GB Ampere fallback when TQ3 paths
 #              don't fit / first-time setup verification
 # ---------------------------------------------------------------------------

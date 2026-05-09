@@ -7,6 +7,7 @@
 #   Vision:    no (frees ~0.5 GB/card for ctx)
 #   Max ctx:   200K (+15K vs dual-nvlink-dflash.yml; NVLink lifts max to 188K stable)
 #   Genesis:   none
+#   Status:    ✅ Production
 #   Best for:  NVLink + peak code TPS, no-vision (max ctx headroom)
 # ---------------------------------------------------------------------------
 # Dual RTX 3090 with NVLink + DFlash text-only — TP=2 + DFlash N=5 + 200K ctx

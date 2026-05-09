@@ -113,11 +113,27 @@ Every compose starts with a `Profile (at-a-glance)` block declaring the (Model, 
 #   Vision:    <yes | no>
 #   Max ctx:   <e.g. 262K>
 #   Genesis:   <none | v7.72.2 | N/A — Genesis is Qwen3-Next-specific>
-#   Status:    <optional — only if not production: ⚠️ PREVIEW / BOOT-OOM / etc.>
+#   Status:    <REQUIRED — exactly one of the enum values below>
+#   Caveats:   <REQUIRED if Status is ⚠️ / 👁️ / ⏸️ / 🗑️; otherwise omit>
 #   Best for:  <one short phrase — what workload this serves; ⭐ for canonical>
 # ---------------------------------------------------------------------------
 # (existing free-form description continues below)
 ```
+
+**Status enum** — pick exactly one:
+
+| Value | Meaning | Validation gate |
+|---|---|---|
+| `✅ Production` | Recommended for users. | verify-full 8/8 + verify-stress 7/7 + bench (BENCHMARKS row) + soak-continuous PASS. |
+| `⚠️ Production w/ caveats` | Works under documented constraints; not the same as broken. | Same gates as Production, but a known-and-disclosed limitation exists (e.g., Cliff 2b at >50K). Caveats line MUST list the constraint. |
+| `🧪 Experimental` | Under active validation; may not boot or pass all tests. | Typically untracked in git. No production guarantee. |
+| `👁️ Preview` | Known quality issues; tracked but not for production. | E.g., quality regressions in soak / NIAH. Caveats line MUST list specific issues. |
+| `⏸️ Upstream-gated` | Exists but blocked by external action (PR merge, driver fix, hardware ceiling). | Boots only with vendored override OR doesn't boot until external dep lands. Caveats line MUST point at the external dep. |
+| `🗑️ Deprecated` | Kept for historical reference; will be removed. | N/A — flagged for cleanup. |
+
+**Why this enum exists**: the previous "Status optional, only when not production" convention left readers guessing whether absence-of-status meant "validated production" or "author forgot to fill it in." Making Status required + enumerated removes that ambiguity. Users picking a config can scan to one field and know the lifecycle stage instantly; new contributors must consciously declare it when authoring.
+
+The `Caveats:` line is REQUIRED whenever Status is ⚠️ / 👁️ / ⏸️ / 🗑️, OMITTED for ✅ / 🧪. Format: a single-line summary or a short bullet list, with links to issues / discussions / upstream PRs where relevant.
 
 This rule applies to **shipped composes AND local-only test composes** — apply the convention even before deciding whether to ship; it avoids a rename later if the experiment graduates.
 

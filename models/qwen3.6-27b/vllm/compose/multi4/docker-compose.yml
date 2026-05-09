@@ -7,6 +7,7 @@
 #   Vision:    yes
 #   Max ctx:   262K
 #   Genesis:   v7.72.2 (full PROD env stack)
+#   Status:    ✅ Production
 #   Best for:  4-card TP=4 baseline — high concurrency, max KV pool size
 # ---------------------------------------------------------------------------
 # Quad RTX 3090 — TP=4 baseline. Qwen3.6-27B + MTP n=3 + fp8 KV + vision.

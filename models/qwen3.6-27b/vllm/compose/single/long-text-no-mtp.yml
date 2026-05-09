@@ -16,7 +16,8 @@
 #   Vision:    no (text-only)
 #   Max ctx:   200K (max-context single-card path)
 #   Genesis:   v7.72.2
-#   Status:    ⚠️ Cliff 2b applies at >50K single-prompt — see warning above
+#   Status:    ⚠️ Production w/ caveats
+#   Caveats:   Cliff 2b at >50K single-prompt context. Sandermage/genesis-vllm-patches#22. Workaround: dual.yml or llamacpp/default.
 #   Best for:  Max single-card context window for one-shot summarization /
 #              long-document Q&A; slower decode (no spec-decode) is the trade
 # ---------------------------------------------------------------------------

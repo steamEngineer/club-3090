@@ -7,6 +7,7 @@
 #   Vision:    yes
 #   Max ctx:   262K (8.2× over bf16 ceiling) — override MAX_NUM_SEQS=4 for 98K + 3.6× concurrency
 #   Genesis:   N/A — Genesis is Qwen3-Next-specific
+#   Status:    ✅ Production
 #   Best for:  Gemma 4 long-context default — full 262K ctx ⭐
 # ---------------------------------------------------------------------------
 # Gemma-4-31B-it (Intel AutoRound INT4) + Google MTP "assistant" drafter

@@ -7,6 +7,7 @@
 #   Vision:    yes
 #   Max ctx:   32K (BF16 ceiling — for 262K code-optimal use dual-dflash-int8.yml)
 #   Genesis:   N/A — Genesis is Qwen3-Next-specific
+#   Status:    ✅ Production
 #   Best for:  Peak code TPS on Gemma 4 (105/177 — +18% code over MTP) ⭐
 # ---------------------------------------------------------------------------
 # Gemma-4-31B-it (Intel AutoRound INT4) + z-lab Gemma 4 DFlash drafter

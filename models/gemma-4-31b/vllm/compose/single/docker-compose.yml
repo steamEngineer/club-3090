@@ -7,6 +7,8 @@
 #   Vision:    yes
 #   Max ctx:   ~16K (theoretical) — boot fails before serving on 24 GB
 #   Genesis:   N/A — Genesis is Qwen3-Next-specific
+#   Status:    ⏸️ Upstream-gated
+#   Caveats:   Boot-OOMs on Ampere 24 GB regardless of KV format (weights+drafter+profiling at 8K ctx leaves no KV pool). Compose preserved for 32 GB+ GPUs (RTX 5090 32 GB validated by @apnar disc #67 — 160/215 TPS at 32K MTP). Re-evaluate when (a) vLLM adds Ampere-aware fp8 dispatch OR (b) PR #41745-style relaxation lands.
 #   Best for:  Single-card 32 GB+ GPUs (RTX 5090 32 GB validated by @apnar disc #67)
 #              For 24 GB Ampere, use dual.yml (dual-card) instead.
 # ---------------------------------------------------------------------------

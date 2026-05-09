@@ -7,6 +7,7 @@
 #   Vision:    yes
 #   Max ctx:   185K
 #   Genesis:   none — DFlash drafter handles spec-decode independently
+#   Status:    ✅ Production
 #   Best for:  NVLink + peak code TPS — +17% over PCIe-only dual-dflash.yml
 # ---------------------------------------------------------------------------
 # Dual RTX 3090 with NVLink + DFlash — TP=2 + DFlash N=5 spec-decode + 185K ctx
