@@ -370,6 +370,24 @@ If you're on **SM89+ hardware (RTX 4090 / 5090, A6000 Ada / Blackwell)**, the pe
 
 ## Note for WSL2 / Windows users
 
+### GPU memory budget on WSL2
+
+WSL2's container CUDA context consumes **~1.31 GiB before vLLM's profiler runs** — the Windows display driver, CUDA runtime, and WDDM overhead reserve memory that's invisible to `nvidia-smi --query-gpu=memory.used` at idle but locked in once the container starts.
+
+This means the shipped `gpu_memory_utilization` defaults (0.92 for single, 0.95 for `long-text.yml`) crash before model load with `ValueError: gpu_memory_utilization too high`. Cross-rig validated by [@easel on 2× WSL2 5090 Laptop machines](https://github.com/noonghunna/club-3090/issues/102#issuecomment-4414111137):
+
+| `gpu_memory_utilization` | 24 GB card | Result |
+|---|---|---|
+| 0.95 | 22.70 GiB requested | ✗ crash before model loads (120 MiB above ceiling) |
+| 0.944 | 22.55 GiB requested | ✓ boots cleanly, ~21 GB peak with model + KV pool |
+| 0.92 | 21.97 GiB requested | ✓ default, conservative — works with smaller `--max-model-len` |
+
+**Formula**: `safe_util = (vram_total_gib - 1.31) / vram_total_gib`. On 24 GB cards that's 0.945. The overhead is variable (idle reports as low as ~300 MiB) but the upper bound is consistent across rigs.
+
+**Recommendation**: drop `GPU_MEMORY_UTILIZATION=0.94` in your `.env` when running on WSL2. The shipped composes' defaults (0.92 / 0.95) are calibrated for headless Linux and can crash on WSL2 at the higher value.
+
+### TDR — kernel-timeout watchdog
+
 WSL2 inherits Windows' GPU timeout policy via WDDM (Windows Display Driver Model). Long-running CUDA kernels can trip **TDR (Timeout Detection and Recovery)** — Windows force-resets the GPU when a kernel exceeds the TDR delay (default 2 seconds), invalidating every CUDA allocation in flight. The signature in vLLM logs is:
 
 ```

@@ -440,6 +440,61 @@ This is the same design difference that explains why llama.cpp doesn't have Clif
 
 ---
 
+## Cliff 3 — DeltaNet SSM state is not prefix-cacheable (the prefill cliff)
+
+A separate cliff from Cliff 1 (memory) and Cliff 2 (GDN forward OOM): a **scaling cliff in TTFT** that fires on multi-turn agentic workloads on single-card vLLM, even when memory is fine and the engine is otherwise healthy.
+
+### What you see
+
+vLLM prefix caching reports 60-80% KV-block hit rates across turns, but **TTFT scales linearly with accumulated context regardless** of cache hit rate. Cross-rig measured by [@easel on RTX 5090 Laptop 24 GB](https://github.com/noonghunna/club-3090/issues/102#issuecomment-4414111137) on `long-text.yml` with the optimal CUDA-graph + chunked-prefill config:
+
+| Turn | Prompt tokens | TTFT | Ratio vs T1 | Decode TPS |
+|---:|---:|---:|---:|---:|
+| 1 | 1,212 | 5.6 s | 1.0× | 62.3 |
+| 5 | 4,972 | 85.3 s | 15.3× | 64.2 |
+| 10 | 21,792 | 202.4 s | **36.3×** | 55.6 |
+| 12 | 35,643 | 254.2 s | **45.5×** | 46.0 |
+| 15 | ~74K | >600 s — TIMEOUT | — | — |
+
+Decode TPS stayed healthy (46-62) throughout. The model computed correctly. The **prefill** was the problem — the warm-cache run B at 68.7% KV-block hit rate at turn 10 took **577s** (2.3× the cold-start 254s at the same depth), confirming the cache wasn't the bottleneck.
+
+### Root cause — DeltaNet recurrent state is not cacheable
+
+Qwen3-Next family (Qwen3.6, Qwen3.5) is a hybrid attention + DeltaNet GDN architecture. Prefix caching works for the **attention** layers' KV blocks — those are content-addressable and cache-friendly. But DeltaNet's recurrent state evolution `h_t = f(h_{t-1}, x_t)` is sequence-dependent: every token's hidden state depends on the previous token's, going back to the start of the conversation. There's no way to "jump in" partway through.
+
+vLLM's prefix-cache hit returns the cached KV blocks, but the GDN layers must replay the entire accumulated sequence to reconstruct the recurrent state. PN32 fixes the OOM stability of this replay (without it, the FLA kernel OOMs in a single shot above ~50K accumulated tokens — that's Cliff 2). PN32 does not fix the O(n) compute scaling, because it can't — the architecture itself is sequential.
+
+### Practical ceiling on single-card vLLM
+
+Per @easel's data on the most-tuned single-card config we have (5090 Laptop, CUDA graphs + PN32 + chunked-prefill 4128, ~110W):
+
+| Use case | Accumulated tokens | TTFT |
+|---|---|---|
+| Short Q&A | < 5K | < 30 s — usable |
+| Light agentic | 10-17K | 45-110 s/turn — slow |
+| IDE-agent at depth | 22-35K | 3-4 min/turn — unusable |
+| Deep agent session | ~74K | > 10 min — client timeout |
+
+This holds for any single-card Qwen3-Next config — Blackwell 5090 Laptop or 3090 alike. The architectural cost is per-token, not per-flop, so faster cards don't escape it.
+
+### How TP=2 helps (but doesn't fully escape)
+
+Dual-card TP=2 splits the GDN forward across 2 GPUs, doubling the per-second compute on the recurrent path. TTFT scaling is still O(n), but the constant is roughly halved. Combined with `max_num_seqs=2` (`dual.yml`), the practical envelope extends — we measure 25K-30K accumulated tokens before TTFT becomes painful, not 5K.
+
+For *deep* agent sessions (50K+) even TP=2 falls behind — at that depth, batch decode dominates economics regardless. **There is no single-Qwen3-Next-vLLM path to fast 50K+ multi-turn agentic on consumer hardware.**
+
+### Why llama.cpp doesn't have Cliff 3
+
+llama.cpp's GDN implementation streams the recurrent state computation tile-by-tile during prefill — the same property that lets it dodge Cliff 2 (OOM) also dodges Cliff 3 (TTFT scaling). The constant factor per-token is similar to vLLM's, but llama.cpp doesn't try to cache anything; it just streams. So a "cache hit" doesn't give you any speedup, but a 30K-context cold prefill takes ~30 sec instead of 200+ sec. **Sustained throughput is lower, sustained TTFT is much better** — exactly the opposite tradeoff vLLM makes.
+
+### Practical recommendation
+
+**For single-card multi-turn agentic Qwen3-Next, use llama.cpp.** This is now elevated from "implied" to "explicit" in our docs. Even when vLLM is faster on the canonical bench (49/65 TPS vs 49/66 for llama.cpp + MTP on 5090 Laptop), the architectural mismatch with prefix caching makes vLLM the wrong choice for IDE-agent workloads on one card.
+
+For dual-card setups: `dual.yml` (fp8 KV) is the right call — handles 25K-30K accumulated context smoothly, and Cliff 3's reach extends but doesn't disappear at TP=2.
+
+---
+
 ## Why llama.cpp dodges both cliffs structurally
 
 Three architectural differences between the engines (full discussion in [docs/engines/LLAMA_CPP.md](engines/LLAMA_CPP.md)):
