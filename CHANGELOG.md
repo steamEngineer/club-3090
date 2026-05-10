@@ -16,7 +16,7 @@ history; SemVer takes over from `v0.3.0` onward.
 
 ---
 
-## Unreleased
+## v0.3.2 — 2026-05-10
 
 
 ### ✨ Features
@@ -47,7 +47,56 @@ what changed.
 
 
 
+### 🧹 Maintenance
 
+- **chore: trigger v0.3.2 release workflow (GitHub deduped previous tag push)** ([255c743](https://github.com/noonghunna/club-3090/commit/255c743dff59149ef83a06a4e63b0e74153c61cb))
+
+
+The v0.3.2 tag was originally pushed at commit 64b0474 but GitHub didn't
+emit a CreateEvent (likely dedup after delete + re-push to same SHA), so
+the release.yml workflow never fired. Empty commit gives the tag a fresh
+SHA that GitHub will process cleanly.
+
+- **chore(changelog): automate CHANGELOG + release notes from commits via cliff (Option A)** ([64b0474](https://github.com/noonghunna/club-3090/commit/64b0474a628d5a91222446d90b4974b14ab3237f))
+
+
+CHANGELOG.md is now auto-generated from commit messages by git-cliff in
+the release workflow. Hand-edits below the static header will be wiped on
+the next tag.
+
+Workflow (`.github/workflows/release.yml`):
+  - On tag push (`v[0-9]+.[0-9]+.[0-9]+`):
+    1. Render GitHub Release body: `git-cliff --latest --strip header`
+       → just the per-version section, no SemVer preamble repeat
+    2. Regenerate full CHANGELOG.md: `git-cliff` (default = all tags)
+       → preserves header + all historical sections
+    3. Commit CHANGELOG.md back to master with `[skip ci]` marker
+    4. Publish GitHub Release with the latest-only body
+
+Template (`cliff.toml`):
+  - `[changelog].header` now holds the SemVer preamble + CalVer→SemVer
+    mapping table (preserved across regens; stripped from GitHub Release
+    bodies via `--strip header`).
+  - `body` template now renders the **full commit message** (subject as
+    bold bullet, body indented below) instead of just the first line.
+    Rich narrative I write in commit message bodies (tables, validation
+    numbers, before/after diffs) now flows into both CHANGELOG.md and the
+    GitHub Release page from the same source.
+  - Per-release Pin/Diff footer guarded with `{% if version %}` so the
+    Unreleased section doesn't emit empty links.
+
+CHANGELOG.md replaced with the auto-gen output. Past hand-written tables
+and phase breakdowns are replaced by the corresponding commit messages
+(those were already rich for commits that mattered — v0.3.1 soak-helper
+fix has its Before/After table in the commit body and renders fine).
+
+Going forward: just write rich commit messages and tag. Both surfaces
+update automatically. No hand-edit of CHANGELOG.md required.
+
+
+
+
+[Pin: `git checkout v0.3.2`] · [Full diff](https://github.com/noonghunna/club-3090/compare/v0.3.1...v0.3.2)
 ## v0.3.1 — 2026-05-10
 
 
