@@ -49,6 +49,9 @@ OPTIONS
   -h, --help       Show this help and exit
   --list-packs     List available packs and exit
   --no-sandboxed   On --full, skip the Docker sandbox packs (= --medium scope)
+  --sandboxed-only Run only the 3 sandbox packs (bugfind-15, cli-40, hermesagent-20).
+                   Skips the deterministic packs — useful when iterating on
+                   sandbox verifiers without paying the deterministic-pack cost.
 
 ENV VARS
   URL              Endpoint base URL (default: auto-detected via preflight,
@@ -96,6 +99,7 @@ TIMEOUT_PER_CASE="${TIMEOUT_PER_CASE:-60}"
 MODE="--medium"   # default
 PACK=""
 NO_SANDBOX=0
+SANDBOXED_ONLY=0
 LIST_PACKS=0
 
 while [[ $# -gt 0 ]]; do
@@ -114,6 +118,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-sandboxed)
       NO_SANDBOX=1
+      shift
+      ;;
+    --sandboxed-only)
+      SANDBOXED_ONLY=1
       shift
       ;;
     --list-packs)
@@ -193,12 +201,14 @@ CLI_ARGS=(
   --output markdown
   --save-json "${JSON_OUT}"
 )
-if [[ -n "$PACK" ]]; then
+if [[ "$SANDBOXED_ONLY" == "1" ]]; then
+  CLI_ARGS+=(--sandboxed-only)
+elif [[ -n "$PACK" ]]; then
   CLI_ARGS+=(--pack "$PACK")
 else
   CLI_ARGS+=("$MODE")
 fi
-if [[ "$NO_SANDBOX" == "1" ]]; then
+if [[ "$NO_SANDBOX" == "1" && "$SANDBOXED_ONLY" != "1" ]]; then
   CLI_ARGS+=(--no-sandboxed-packs)
 fi
 
