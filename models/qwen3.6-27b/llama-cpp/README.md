@@ -30,7 +30,7 @@ Showcase: full **262K context** on one 3090 with vision + q4_0 KV.
 
 ```bash
 cd models/qwen3.6-27b/llama-cpp/compose
-MODEL_DIR=/mnt/models/gguf docker compose up -d
+MODEL_DIR=/mnt/models/huggingface docker compose up -d
 ```
 
 Memory budget: 14.5 GB (Q3_K_XL) + 4.5 GB KV @ 262K + 0.8 GB mmproj ≈ 20 GB / 24 GB.

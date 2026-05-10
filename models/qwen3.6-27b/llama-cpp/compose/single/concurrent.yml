@@ -1,6 +1,6 @@
 # ===========================================================================
 # Profile (at-a-glance):
-#   Model:     Qwen3.6-27B (Unsloth Q5_K_XL GGUF)
+#   Model:     Qwen3.6-27B (Unsloth Q3_K_XL GGUF)
 #   Engine:    llama.cpp (NOT vLLM)
 #   Topology:  Single 3090 (TP=1)
 #   Drafter:   none

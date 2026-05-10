@@ -325,8 +325,8 @@ preflight_compose_deps() {
     mmproj_in_container="${mmproj_in_container//\$\{MMPROJ_FILE:-/}"
     mmproj_in_container="${mmproj_in_container%\}}"
 
-    [[ -z "$gguf_in_container" ]]   && gguf_in_container="qwen3.6-27b/unsloth-q3kxl/Qwen3.6-27B-UD-Q3_K_XL.gguf"
-    [[ -z "$mmproj_in_container" ]] && mmproj_in_container="qwen3.6-27b/mmproj-F16.gguf"
+    [[ -z "$gguf_in_container" ]]   && gguf_in_container="qwen3.6-27b-gguf/unsloth-q3kxl/Qwen3.6-27B-UD-Q3_K_XL.gguf"
+    [[ -z "$mmproj_in_container" ]] && mmproj_in_container="qwen3.6-27b-gguf/mmproj-F16.gguf"
 
     if [[ -n "${GGUF_FILE:-}" ]];   then gguf_in_container="$GGUF_FILE";     fi
     if [[ -n "${MMPROJ_FILE:-}" ]]; then mmproj_in_container="$MMPROJ_FILE"; fi
@@ -375,9 +375,9 @@ preflight_compose_deps() {
   if [[ $hint_gguf -eq 1 ]]; then
     echo "[preflight]   hf download unsloth/Qwen3.6-27B-GGUF \\" >&2
     echo "[preflight]     Qwen3.6-27B-UD-Q3_K_XL.gguf mmproj-F16.gguf \\" >&2
-    echo "[preflight]     --local-dir ${model_dir}/qwen3.6-27b/unsloth-q3kxl" >&2
+    echo "[preflight]     --local-dir ${model_dir}/qwen3.6-27b-gguf/unsloth-q3kxl" >&2
     echo "[preflight]   # mmproj lands at unsloth-q3kxl/ — move it up so the default --mmproj path resolves:" >&2
-    echo "[preflight]   #   mv ${model_dir}/qwen3.6-27b/unsloth-q3kxl/mmproj-F16.gguf ${model_dir}/qwen3.6-27b/" >&2
+    echo "[preflight]   #   mv ${model_dir}/qwen3.6-27b-gguf/unsloth-q3kxl/mmproj-F16.gguf ${model_dir}/qwen3.6-27b-gguf/" >&2
     echo "[preflight]   (~16 GB total. setup.sh today only fetches the vLLM AutoRound weights;" >&2
     echo "[preflight]    GGUF must be fetched separately for any llamacpp/* variant.)" >&2
   fi
