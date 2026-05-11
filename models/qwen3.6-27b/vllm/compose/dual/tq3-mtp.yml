@@ -85,13 +85,13 @@ services:
       # TP=2 on AutoRound W4A16 (drops out when upstream merges).
       - ../../patches/vllm-marlin-pad/marlin.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/kernels/linear/mixed_precision/marlin.py:ro
       - ../../patches/vllm-marlin-pad/MPLinearKernel.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/kernels/linear/mixed_precision/MPLinearKernel.py:ro
-      # TOMBSTONED: the partial PR #40798 (gpu_model_runner.py) +
-      # manually-rebased PR #40914 (K+1 dispatch) overlays were validated
-      # 2026-05-11 but produce corrupted attention output on long-ctx
-      # (only 1 of 5 needed Genesis fixes is upstream). Patches are
-      # retained in models/qwen3.6-27b/vllm/patches/{vllm-pr40798-rebased,
-      # vllm-pr40914-k1-only} for re-test once upstream PR landscape
-      # extends to cover the gap.
+      # TOMBSTONED: PR #40798 partial + PR #40914 K+1 dispatch + MTP-skip
+      # layer-filter all validated 2026-05-11. None close the gap — MTP-skip
+      # filter (round 3) didn't fix the `!`-flood corruption; the target's
+      # full-attention layers' K+1 dispatch is also producing wrong output
+      # on this nightly + Qwen3-Next layout, not just the drafter's. Genesis
+      # P64/P65/P66/P68/P69 is what's needed; we don't have all 5 as upstream
+      # PRs. Patches retained for re-test once upstream landscape extends.
     environment:
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
       - VLLM_WORKER_MULTIPROC_METHOD=spawn
