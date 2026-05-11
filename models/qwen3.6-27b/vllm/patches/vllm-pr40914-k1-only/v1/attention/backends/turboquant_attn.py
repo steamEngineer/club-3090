@@ -18,6 +18,7 @@ Per-head per-position slot layout:
 
 import functools
 import math
+import os
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
@@ -60,6 +61,13 @@ from vllm.v1.worker.workspace import (
 _HAS_FLASH_ATTN = is_flash_attn_varlen_func_available()
 if _HAS_FLASH_ATTN:
     from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
+
+
+class _Club3090SkipDummy(Exception):
+    """Skip dummy/warmup K+1 fires during instrumentation logging."""
+
+
+_CLUB3090_TQ_K1_SKIP_MTP = os.getenv("CLUB3090_TQ_K1_SKIP_MTP", "1") != "0"
 
 # Continuation prefill: for small continuation chunks (q_len ≤ threshold),
 # use the TQ decode kernel directly instead of full-dequant + flash_attn.
@@ -466,6 +474,33 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             and (N % attn_metadata.max_query_len) == 0
             and attn_metadata.query_start_loc is not None
         )
+        if _spec_verify_eligible and _CLUB3090_TQ_K1_SKIP_MTP:
+            _layer_name = str(getattr(layer, "layer_name", ""))
+            _is_mtp_layer = (
+                _layer_name == "mtp"
+                or _layer_name.startswith("mtp.")
+                or ".mtp." in _layer_name
+            )
+            if _is_mtp_layer:
+                # Round-2 instrumentation showed this branch firing first on
+                # mtp.layers.0.self_attn.attn. PR #40914 is intended for the
+                # target model's K+1 verify pass; routing the drafter through
+                # the same synthetic seq_lens path produced accepted but
+                # corrupted output. Skip MTP layers by default while preserving
+                # an env escape hatch for A/B:
+                #   CLUB3090_TQ_K1_SKIP_MTP=0
+                if (
+                    not torch.cuda.is_current_stream_capturing()
+                    and not getattr(layer, "_club3090_k1_mtp_skip_logged", False)
+                ):
+                    import logging as _club3090_log
+
+                    _club3090_log.getLogger(__name__).warning(
+                        "[club3090-k1-skip] skipping K+1 dispatch on MTP layer=%s",
+                        _layer_name,
+                    )
+                    layer._club3090_k1_mtp_skip_logged = True
+                _spec_verify_eligible = False
         if _spec_verify_eligible:
             K_PLUS_1 = attn_metadata.max_query_len
             B = N // K_PLUS_1

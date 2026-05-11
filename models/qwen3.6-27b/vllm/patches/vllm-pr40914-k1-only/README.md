@@ -69,3 +69,26 @@ rebased before merge so it doesn't revert #41434).
 - Compose: `dual/int8-tq3.yml`
 - Qwen 3.6 27B AutoRound INT4, TQ3 KV, MTP n=3, 262K × 2 streams
 - 2026-05-11
+
+## Round-2 local experiment: skip MTP drafter layers
+
+Instrumentation captured the K+1 dispatch firing first on:
+
+```text
+mtp.layers.0.self_attn.attn
+```
+
+That is the MTP drafter path, not a target-model full-attention verify
+layer. With this branch active there, acceptance stabilized at AL=4.0 /
+~100%, but output degenerated into repeated `!`, meaning drafter and
+target were agreeing on the same corrupt path.
+
+This overlay now skips K+1 dispatch on `mtp.*` layers by default while
+leaving the target verify path eligible. A/B escape hatch:
+
+```bash
+CLUB3090_TQ_K1_SKIP_MTP=0
+```
+
+Use this next to test whether PR #40914's K+1 route is target-verify-only
+and the drafter should stay on the original continuation/decode path.
