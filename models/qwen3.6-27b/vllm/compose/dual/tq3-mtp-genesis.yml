@@ -94,6 +94,12 @@ services:
       # from this compose 2026-05-05.
       - ../../patches/genesis/vllm/_genesis:/usr/local/lib/python3.12/dist-packages/vllm/_genesis:ro
       - ../../patches/local/qwen3coder_tool_parser_deferred_commit.py:/patches/qwen3coder_tool_parser_deferred_commit.py:ro
+      # froggeric/Qwen-Fixed-Chat-Templates qwen3.6 — fixes 7 default-template
+      # bugs (empty <think></think> spam, </thinking> hallucination, unclosed
+      # think before tool call, no-user-query crash, developer role, etc.).
+      # See docs/UPSTREAM.md "Community templates / model assets" + the row at
+      # https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates
+      - ../../patches/froggeric-chat-template/chat_template.jinja:/etc/qwen-froggeric-chat-template.jinja:ro
     environment:
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
       - VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -258,6 +264,9 @@ services:
       - --kv-cache-dtype
       - "${KV_CACHE_DTYPE:-turboquant_3bit_nc}"
       - --trust-remote-code
+      # froggeric chat-template override (see volumes block + docs/UPSTREAM.md)
+      - --chat-template
+      - /etc/qwen-froggeric-chat-template.jinja
       - --reasoning-parser
       - qwen3
       - --default-chat-template-kwargs

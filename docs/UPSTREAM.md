@@ -210,6 +210,16 @@ Re-benched 2026-04-30 PM on Qwen3.6-27B Q4_K_M + matched z-lab/Qwen3.6-27B-DFlas
 
 ---
 
+## Community templates / model assets (Hugging Face)
+
+External-but-load-bearing resources that aren't issue trackers (no PR / merge state to track). Watch list — re-check when upstream Qwen / Gemma official templates change, or when these resources update.
+
+| Resource | Status | Why it matters | Drop trigger |
+|---|---|---|---|
+| **[froggeric/Qwen-Fixed-Chat-Templates](https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates)** — community fork of the default Qwen 3.5 / 3.6 chat templates fixing seven documented bugs (empty `<think></think>` spam in past turns, `</thinking>` hallucination on Qwen 3.6, unclosed thinking before tool call, no-user-query crash in agentic loops, `developer` role rejection, `\|items` filter for C++ engines, type-aware `tojson`). Surfaced by @troymroberts in [discussion #121](https://github.com/noonghunna/club-3090/discussions/121). Vendored snapshot at [`models/qwen3.6-27b/vllm/patches/froggeric-chat-template/chat_template.jinja`](../models/qwen3.6-27b/vllm/patches/froggeric-chat-template/chat_template.jinja); mounted default-on across all 22 vanilla Qwen 3.6 composes via `--chat-template`. Carnice and Qwopus composes intentionally excluded (ship their own bespoke templates). | 🟡 First-pass A/B 2026-05-12 — **+15pp on `hermesagent-20` (45% → 60%)** on Qwen 3.6 27B INT4 + INT8 PTH KV (dual 3090). 7 other packs flat. Control run (revert template, same commit) pending to isolate PR #35936 confound. | Replace with default model template if upstream Qwen pushes equivalent fixes. **Watch for**: froggeric updates the template (Qwen 4 support, additional bug fixes), or Qwen upstream lands their own version. |
+
+---
+
 ## Filing conventions
 
 When you file or learn of a new upstream issue:
