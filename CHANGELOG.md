@@ -16,6 +16,16 @@ history; SemVer takes over from `v0.3.0` onward.
 
 ---
 
+## v0.5.4 — 2026-05-13
+
+
+### 🐛 Bug fixes
+
+- fix(scripts): make submit-bench issue-first ([22bf2e9](https://github.com/noonghunna/club-3090/commit/22bf2e9398c7907aae6b62809bde30e111e4a700))
+
+
+
+[Pin: `git checkout v0.5.4`] · [Full diff](https://github.com/noonghunna/club-3090/compare/v0.5.3...v0.5.4)
 ## v0.5.3 — 2026-05-13
 
 
