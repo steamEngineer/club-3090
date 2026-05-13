@@ -16,6 +16,16 @@ history; SemVer takes over from `v0.3.0` onward.
 
 ---
 
+## v0.5.2 — 2026-05-13
+
+
+### 🎯 New models + serving paths
+
+- Add hardware-aware compose preflight ([2698552](https://github.com/noonghunna/club-3090/commit/26985527f75d8da2a32a8a2f985989d5dcf9e89a))
+
+
+
+[Pin: `git checkout v0.5.2`] · [Full diff](https://github.com/noonghunna/club-3090/compare/v0.5.1...v0.5.2)
 ## v0.5.1 — 2026-05-13
 
 
