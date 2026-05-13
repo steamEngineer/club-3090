@@ -2,7 +2,8 @@
 #
 # Model-aware one-shot setup for club-3090.
 #
-#   bash scripts/setup.sh <model-name>
+#   bash scripts/setup.sh                # interactive model picker in a TTY
+#   bash scripts/setup.sh <model-name>   # scripted/CI positional form
 #
 # Currently supported:
 #   qwen3.6-27b   →  Lorbus/Qwen3.6-27B-int4-AutoRound + Genesis patches
@@ -37,15 +38,89 @@
 
 set -euo pipefail
 
-# ---------- Model dispatch ----------
-MODEL_NAME="${1:-}"
-if [[ -z "${MODEL_NAME}" ]]; then
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+
+usage() {
   echo "Usage: $0 <model-name>"
+  echo "       $0              # interactive model picker in a TTY"
+  echo ""
+  echo "Run with no model name in a normal terminal to open the hardware-aware"
+  echo "model picker. Use the positional form in scripts/CI to skip prompts."
   echo ""
   echo "Supported model names:"
   echo "  qwen3.6-27b"
   echo "  gemma-4-31b"
-  exit 1
+}
+
+model_label() {
+  case "$1" in
+    qwen3.6-27b) echo "Qwen 3.6 27B" ;;
+    gemma-4-31b) echo "Gemma 4 31B" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+model_picker_line() {
+  local idx="$1" model="$2" size="$3" status mark reason
+  status="$(compose_hw_model_status "$ROOT_DIR" "$model" 2>/dev/null || true)"
+  reason="${status#*|}"
+  if [[ "$status" == ok\|* ]]; then
+    mark="✓"
+  else
+    mark="✗"
+  fi
+  printf "  %s. %-14s (%s)  %s %s\n" "$idx" "$(model_label "$model")" "$size" "$mark" "$reason"
+}
+
+pick_model_interactive() {
+  # shellcheck source=lib/compose-meta.sh
+  source "${ROOT_DIR}/scripts/lib/compose-meta.sh"
+
+  echo "[setup] Which model to download?" >&2
+  echo "" >&2
+  model_picker_line "1" "qwen3.6-27b" "~14 GB AutoRound INT4" >&2
+  model_picker_line "2" "gemma-4-31b" "~21 GB AutoRound INT4 + drafter" >&2
+  echo "  3. Both           (~30 GB total)  downloads both model families" >&2
+  echo "" >&2
+  while true; do
+    local pick
+    read -rp "Choice [1-3]: " pick
+    case "$pick" in
+      1) echo "qwen3.6-27b"; return ;;
+      2) echo "gemma-4-31b"; return ;;
+      3) echo "both"; return ;;
+      *) echo "  ! invalid — pick 1, 2, or 3" >&2 ;;
+    esac
+  done
+}
+
+# ---------- Model dispatch ----------
+case "${1:-}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+esac
+
+MODEL_NAME="${1:-}"
+if [[ -z "${MODEL_NAME}" ]]; then
+  if [[ -t 0 && -t 1 ]]; then
+    MODEL_NAME="$(pick_model_interactive)"
+  else
+    usage
+    echo ""
+    echo "(Interactive picker available in a TTY shell. Use the positional form in scripts/CI.)"
+    exit 1
+  fi
+fi
+
+if [[ "${MODEL_NAME}" == "both" ]]; then
+  # Resolve MODEL_DIR once in the parent by reusing the normal prompt below,
+  # then recurse through the positional form for each model.
+  SETUP_BOTH_MODE=1
+  MODEL_NAME="qwen3.6-27b"
+else
+  SETUP_BOTH_MODE=0
 fi
 
 # ALWAYS_DRAFT_REPO + ALWAYS_DRAFT_SUBDIR: a drafter that this model REQUIRES
@@ -88,8 +163,6 @@ case "${MODEL_NAME}" in
     exit 1
     ;;
 esac
-
-ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # ---------- MODEL_DIR resolution ----------
 # Order of precedence:
@@ -158,6 +231,18 @@ fi
 
 # Step 4: silent fallback (preserves prior behavior for non-TTY contexts)
 MODEL_DIR="${MODEL_DIR:-${ROOT_DIR}/models-cache}"
+if [[ "${SETUP_BOTH_MODE:-0}" == "1" ]]; then
+  export MODEL_DIR
+  echo "[setup] downloading both supported models into ${MODEL_DIR}"
+  echo ""
+  bash "$0" qwen3.6-27b
+  echo ""
+  bash "$0" gemma-4-31b
+  echo ""
+  echo "[setup] ✓ Both models downloaded."
+  echo "[setup] Next: bash scripts/launch.sh"
+  exit 0
+fi
 GENESIS_DIR="${ROOT_DIR}/models/${MODEL_NAME}/vllm/patches/genesis"
 
 cd "${ROOT_DIR}"
@@ -445,6 +530,7 @@ echo ""
 # refactored 2026-05-03 to vendor the two files in-repo, fixing #37.)
 
 # Per-model "next steps" — different composes / served-model-name / port between models.
+SETUP_MODEL_DISPLAY="$(model_label "${MODEL_NAME}")"
 case "${MODEL_NAME}" in
   qwen3.6-27b)
     SAMPLE_CONTAINER="vllm-qwen36-27b"
@@ -468,6 +554,9 @@ case "${MODEL_NAME}" in
     ;;
 esac
 
+echo "[setup] ✓ ${SETUP_MODEL_DISPLAY} downloaded."
+echo "[setup] Next: bash scripts/launch.sh"
+echo ""
 echo "Next — single-card vLLM (default):"
 if [[ "${MODEL_NAME}" == "gemma-4-31b" ]]; then
   echo "  bash scripts/switch.sh vllm/gemma-mtp"

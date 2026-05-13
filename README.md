@@ -66,13 +66,15 @@ Bench protocol: 3 warm + 5 measured runs of the canonical narrative + code promp
 git clone https://github.com/noonghunna/club-3090.git
 cd club-3090
 
-# 2. Download + SHA-verify the model (~20 GB; clones Genesis patches too)
-#    (asks you where to put model weights — pick in-repo default, ~/models, or
-#     a custom path on a different drive. To skip the prompt:
-#     `export MODEL_DIR=/mnt/your-drive/models` before running. See FAQ + .env.example.)
-bash scripts/setup.sh qwen3.6-27b
+# 2. Pick/download + SHA-verify the model (interactive hardware-aware picker)
+#    (asks you which model, then where to put model weights — pick in-repo
+#     default, ~/models, or a custom path on a different drive. To skip prompts:
+#     `export MODEL_DIR=/mnt/your-drive/models` and pass the model name. See FAQ.)
+bash scripts/setup.sh
+#    Or scripted:
+#      bash scripts/setup.sh qwen3.6-27b
 
-# 3. Pick a config + boot it (interactive wizard — asks engine / cards / workload)
+# 3. Pick a config + boot it (interactive hardware-aware wizard — asks cards / workload)
 bash scripts/launch.sh
 #    Or skip the wizard:
 #      bash scripts/launch.sh --variant vllm/default      # single-card chat (recommended)

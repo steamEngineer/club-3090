@@ -7,12 +7,14 @@
 # what you want, use `scripts/switch.sh <variant>` directly.
 #
 # Usage:
-#   bash scripts/launch.sh                              # interactive wizard
+#   bash scripts/launch.sh                              # interactive hardware-aware wizard
 #   bash scripts/launch.sh --variant <name>             # skip wizard, boot directly
 #   bash scripts/launch.sh --engine vllm --cards 1      # partial flags, ask the rest
 #   bash scripts/launch.sh --no-verify                  # skip post-launch verify-full
 #   bash scripts/launch.sh --no-preflight               # skip docker/GPU pre-flight
 #
+# The wizard marks variants that don't fit the detected GPUs; direct
+# --variant keeps the power-user path and delegates final gating to switch.sh.
 # All flags accept the same names as `switch.sh --list` produces.
 # Examples:
 #   bash scripts/launch.sh --variant vllm/default
@@ -96,6 +98,116 @@ choose() {
   done
 }
 
+declare -A LAUNCH_VARIANT_COMPOSE=(
+  [vllm/default]="models/qwen3.6-27b/vllm/compose/single/docker-compose.yml"
+  [vllm/long-vision]="models/qwen3.6-27b/vllm/compose/single/long-vision.yml"
+  [vllm/long-text]="models/qwen3.6-27b/vllm/compose/single/long-text.yml"
+  [vllm/long-text-no-mtp]="models/qwen3.6-27b/vllm/compose/single/long-text-no-mtp.yml"
+  [vllm/bounded-thinking]="models/qwen3.6-27b/vllm/compose/single/bounded-thinking.yml"
+  [vllm/tools-text]="models/qwen3.6-27b/vllm/compose/single/tools-text.yml"
+  [vllm/minimal]="models/qwen3.6-27b/vllm/compose/single/minimal.yml"
+  [vllm/dual]="models/qwen3.6-27b/vllm/compose/dual/docker-compose.yml"
+  [vllm/dual4]="models/qwen3.6-27b/vllm/compose/multi4/docker-compose.yml"
+  [vllm/dual4-dflash]="models/qwen3.6-27b/vllm/compose/multi4/dflash.yml"
+  [vllm/dual-turbo]="models/qwen3.6-27b/vllm/compose/dual/turbo.yml"
+  [vllm/dual-dflash]="models/qwen3.6-27b/vllm/compose/dual/dflash.yml"
+  [vllm/dual-dflash-noviz]="models/qwen3.6-27b/vllm/compose/dual/dflash-noviz.yml"
+  [vllm/dual-nvlink]="models/qwen3.6-27b/vllm/compose/dual/nvlink.yml"
+  [vllm/dual-nvlink-turbo]="models/qwen3.6-27b/vllm/compose/dual/nvlink-turbo.yml"
+  [vllm/dual-nvlink-dflash]="models/qwen3.6-27b/vllm/compose/dual/nvlink-dflash.yml"
+  [vllm/dual-nvlink-dflash-noviz]="models/qwen3.6-27b/vllm/compose/dual/nvlink-dflash-noviz.yml"
+  [vllm/gemma-mtp]="models/gemma-4-31b/vllm/compose/dual/docker-compose.yml"
+  [vllm/gemma-mtp-tp1]="models/gemma-4-31b/vllm/compose/single/docker-compose.yml"
+  [vllm/gemma-dflash]="models/gemma-4-31b/vllm/compose/dual/dflash.yml"
+)
+
+variant_hw_status() {
+  local variant="$1"
+  local rel="${LAUNCH_VARIANT_COMPOSE[$variant]:-}"
+  if [[ -z "$rel" ]]; then
+    printf 'ok|fits your rig'
+    return 0
+  fi
+
+  local compose_file="${ROOT_DIR}/${rel}"
+  if [[ ! -f "$compose_file" ]]; then
+    printf 'unknown|compose metadata unavailable'
+    return 2
+  fi
+  compose_hw_compose_status "$compose_file" 2>/dev/null || true
+}
+
+choose_variant() {
+  # choose_variant "prompt" "default-variant" "label1" "value1" ...
+  local prompt="$1" default_variant="$2"
+  shift 2
+
+  local i labels=() values=() statuses=() eligible=()
+  while [[ $# -gt 0 ]]; do
+    labels+=("$1")
+    values+=("$2")
+    statuses+=("$(variant_hw_status "$2")")
+    shift 2
+  done
+
+  local default_idx=""
+  for i in "${!values[@]}"; do
+    if [[ "${values[$i]}" == "$default_variant" && "${statuses[$i]}" == ok\|* ]]; then
+      default_idx=$((i + 1))
+      break
+    fi
+  done
+  if [[ -z "$default_idx" ]]; then
+    for i in "${!values[@]}"; do
+      if [[ "${statuses[$i]}" == ok\|* || "${statuses[$i]}" == unknown\|* ]]; then
+        default_idx=$((i + 1))
+        break
+      fi
+    done
+  fi
+
+  echo "" >&2
+  echo "$prompt" >&2
+  for i in "${!labels[@]}"; do
+    local status="${statuses[$i]}"
+    local state="${status%%|*}"
+    local reason="${status#*|}"
+    local marker="✓"
+    case "$state" in
+      ok) marker="✓" ;;
+      unknown) marker="?" ;;
+      *) marker="✗" ;;
+    esac
+    if [[ -n "$default_idx" && $((i + 1)) -eq "$default_idx" ]]; then
+      printf "  %d) %s  %s %s  [default]\n" "$((i + 1))" "${labels[$i]}" "$marker" "$reason" >&2
+    else
+      printf "  %d) %s  %s %s\n" "$((i + 1))" "${labels[$i]}" "$marker" "$reason" >&2
+    fi
+  done
+
+  if [[ -z "$default_idx" ]]; then
+    echo "ERROR: no eligible variants in this menu. Use scripts/switch.sh --force <variant> to attempt anyway." >&2
+    exit 1
+  fi
+
+  while true; do
+    local pick
+    read -rp "Choice [1-${#labels[@]}, default ${default_idx}]: " pick
+    pick="${pick:-$default_idx}"
+    if [[ "$pick" =~ ^[0-9]+$ ]] && (( pick >= 1 && pick <= ${#labels[@]} )); then
+      local status="${statuses[$((pick - 1))]}"
+      if [[ "$status" == no\|* ]]; then
+        echo "  That variant won't run on your detected rig: ${status#*|}" >&2
+        echo "  Pick another, or use:  bash scripts/switch.sh --force ${values[$((pick - 1))]}" >&2
+        continue
+      fi
+      echo "${values[$((pick - 1))]}"
+      return
+    fi
+    echo "  invalid — pick a number 1-${#labels[@]}" >&2
+  done
+}
+
 # --- wizard ---
 # Flow: cards → workload → auto-pick engine. Newcomers can answer "how
 # many GPUs" and "what do I want to do" but rarely "vLLM or llama.cpp" —
@@ -151,8 +263,15 @@ if [[ -z "$VARIANT" ]]; then
         "[fallback] tools-text 75K FP8 (FP8 KV alternative for accuracy compare)"  "vllm/tools-text"
         "[fallback] minimal 32K (no Genesis, no spec-decode — diagnostic stack)"   "vllm/minimal"
       )
+      VLLM_DUAL_OPTS=(
+        "[2-card] vllm/dual — 262K + vision + 2 streams"             "vllm/dual"
+        "[2-card] vllm/dual-turbo — 4 streams @ 262K, TQ3 KV"        "vllm/dual-turbo"
+        "[2-card] vllm/dual-dflash — peak code TPS with vision"      "vllm/dual-dflash"
+        "[2-card] vllm/gemma-mtp — Gemma 4 dual-card default"        "vllm/gemma-mtp"
+      )
     else
       VLLM_FALLBACK_OPTS=()
+      VLLM_DUAL_OPTS=()
     fi
     if [[ -z "$ENGINE" || "$ENGINE" == "llamacpp" ]]; then
       LLAMA_FALLBACK_OPTS=(
@@ -161,19 +280,29 @@ if [[ -z "$VARIANT" ]]; then
     else
       LLAMA_FALLBACK_OPTS=()
     fi
-    VARIANT=$(choose "What's your main workload?" \
+    if [[ -n "$ENGINE" && "$ENGINE" != "vllm" && "$ENGINE" != "llamacpp" ]]; then
+      echo "ERROR: --engine ${ENGINE} unsupported (expected vllm or llamacpp)." >&2
+      exit 1
+    fi
+    if [[ "$ENGINE" == "llamacpp" ]]; then
+      DEFAULT_VARIANT="llamacpp/default"
+    else
+      DEFAULT_VARIANT="vllm/long-text"
+    fi
+    VARIANT=$(choose_variant "What's your main workload?" "$DEFAULT_VARIANT" \
       "${VLLM_OPTS[@]}" "${LLAMA_OPTS[@]}" \
-      "${VLLM_FALLBACK_OPTS[@]}" "${LLAMA_FALLBACK_OPTS[@]}")
+      "${VLLM_FALLBACK_OPTS[@]}" "${VLLM_DUAL_OPTS[@]}" "${LLAMA_FALLBACK_OPTS[@]}")
   elif [[ "$CARDS" == "2" ]]; then
     if [[ -n "$ENGINE" && "$ENGINE" != "vllm" ]]; then
       echo "ERROR: --engine ${ENGINE} not supported on 2× cards (no llama.cpp dual recipe yet)." >&2
       exit 1
     fi
-    VARIANT=$(choose "What's your dual-card priority?" \
+    VARIANT=$(choose_variant "What's your dual-card priority?" "vllm/dual" \
       "Balanced default — 262K + vision + 2 streams (recommended)" "vllm/dual" \
       "Multi-tenant — 4 concurrent streams @ 262K, TQ3 KV"         "vllm/dual-turbo" \
       "Peak code TPS with vision (185K, DFlash N=5)"               "vllm/dual-dflash" \
-      "Peak code TPS no vision (200K, DFlash N=5)"                 "vllm/dual-dflash-noviz")
+      "Peak code TPS no vision (200K, DFlash N=5)"                 "vllm/dual-dflash-noviz" \
+      "Gemma 4 dual-card default — 32K + vision + MTP"             "vllm/gemma-mtp")
   else
     echo "ERROR: --cards ${CARDS} unsupported (expected 1 or 2)." >&2
     exit 1

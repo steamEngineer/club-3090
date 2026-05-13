@@ -130,6 +130,12 @@ If your numbers on the same compose look different from ours by >15%, the most l
 
 ## Setup
 
+### How do I pick the right model + variant?
+
+For a first install, run `bash scripts/setup.sh` with no model argument in a normal terminal. It opens a hardware-aware model picker, marks Qwen / Gemma / Both as eligible or not for your detected GPUs, then continues into the existing download flow.
+
+After setup, run `bash scripts/launch.sh`. Its existing cards + workload wizard now marks compose variants with hardware fit and picks the recommended default for the rig (`vllm/long-text` on one 24 GB card, `vllm/dual` on matched 2× 3090). Power-user forms still work: `bash scripts/setup.sh qwen3.6-27b`, `bash scripts/launch.sh --variant vllm/dual`, plus `setup.sh --help` / `launch.sh --help`.
+
 ### `bash scripts/setup.sh qwen3.6-27b` is downloading 20+ GB. Where does it go? / Can I put models on a different drive?
 
 Yes. The knob is `MODEL_DIR`, with **four ways** to set it (priority order):
@@ -140,7 +146,7 @@ Yes. The knob is `MODEL_DIR`, with **four ways** to set it (priority order):
    bash scripts/setup.sh qwen3.6-27b
    ```
 2. **`.env` file at repo root** — picked up automatically on every script run. See [`.env.example`](../.env.example).
-3. **Interactive prompt** — `bash scripts/setup.sh qwen3.6-27b` with nothing set offers three choices: in-repo default, `~/models`, or custom path. After you pick custom, it asks "Save `MODEL_DIR=/your/path` to `.env` so we skip this next time?" — say `Y` and it persists for every subsequent `launch.sh` / `switch.sh` / `bench.sh` call.
+3. **Interactive prompt** — `bash scripts/setup.sh` with nothing set first asks which model to download, then offers three model-dir choices: in-repo default, `~/models`, or custom path. After you pick custom, it asks "Save `MODEL_DIR=/your/path` to `.env` so we skip this next time?" — say `Y` and it persists for every subsequent `launch.sh` / `switch.sh` / `bench.sh` call.
 4. **Silent fallback** — `<repo>/models-cache/`. Functional but pollutes the git tree; not recommended.
 
 Every script that touches model paths reads from the same `MODEL_DIR`. The compose YAMLs' volume mount is `${MODEL_DIR:-...}:/root/.cache/huggingface` — once set, every container reads + writes there.

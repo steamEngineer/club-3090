@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+TMP_DIR="$(mktemp -d)"
+ORIG_PATH="$PATH"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+assert_contains() {
+  local haystack="$1"
+  local needle="$2"
+  if [[ "$haystack" != *"$needle"* ]]; then
+    echo "ASSERTION FAILED: expected output to contain: $needle" >&2
+    echo "--- output ---" >&2
+    echo "$haystack" >&2
+    exit 1
+  fi
+}
+
+assert_not_contains() {
+  local haystack="$1"
+  local needle="$2"
+  if [[ "$haystack" == *"$needle"* ]]; then
+    echo "ASSERTION FAILED: expected output not to contain: $needle" >&2
+    echo "--- output ---" >&2
+    echo "$haystack" >&2
+    exit 1
+  fi
+}
+
+make_mock_tools() {
+  mkdir -p "${TMP_DIR}/bin"
+  cat > "${TMP_DIR}/bin/nvidia-smi" <<'MOCK_NVIDIA_SMI'
+#!/usr/bin/env bash
+case "$*" in
+  *"--query-gpu=index,name,memory.total,compute_cap"*)
+    printf '%s\n' "${MOCK_GPU_QUERY:?MOCK_GPU_QUERY not set}"
+    ;;
+  "-L")
+    printf '%s\n' "${MOCK_GPU_QUERY:?MOCK_GPU_QUERY not set}" \
+      | awk -F, '{gsub(/^[ \t]+|[ \t]+$/, "", $1); gsub(/^[ \t]+|[ \t]+$/, "", $2); print "GPU " $1 ": " $2}'
+    ;;
+  *)
+    echo "unexpected nvidia-smi invocation: $*" >&2
+    exit 2
+    ;;
+esac
+MOCK_NVIDIA_SMI
+  chmod +x "${TMP_DIR}/bin/nvidia-smi"
+
+  cat > "${TMP_DIR}/switch-mock" <<'MOCK_SWITCH'
+#!/usr/bin/env bash
+echo "SWITCHED $*"
+MOCK_SWITCH
+  chmod +x "${TMP_DIR}/switch-mock"
+
+  export PATH="${TMP_DIR}/bin:${ORIG_PATH}"
+}
+
+set_rig() {
+  export MOCK_GPU_QUERY="$1"
+}
+
+model_status() {
+  local model="$1"
+  (
+    source "${ROOT_DIR}/scripts/lib/compose-meta.sh"
+    compose_hw_model_status "$ROOT_DIR" "$model"
+  )
+}
+
+assert_model_status() {
+  local model="$1"
+  local expected_prefix="$2"
+  local expected_text="${3:-}"
+  local status
+  status="$(model_status "$model" || true)"
+  if [[ "$status" != "${expected_prefix}"* ]]; then
+    echo "ASSERTION FAILED: ${model} status expected prefix '${expected_prefix}', got '${status}'" >&2
+    exit 1
+  fi
+  if [[ -n "$expected_text" ]]; then
+    assert_contains "$status" "$expected_text"
+  fi
+}
+
+make_mock_tools
+
+# Matched 2x3090: Qwen and Gemma both have a viable compose.
+set_rig $'0, NVIDIA GeForce RTX 3090, 24576, 8.6\n1, NVIDIA GeForce RTX 3090, 24576, 8.6'
+assert_model_status "qwen3.6-27b" "ok|fits your rig"
+assert_model_status "gemma-4-31b" "ok|fits your rig"
+
+# Single 24 GB Ampere: Qwen fits; Gemma needs either 32 GB+ single-card or 2x24 GB.
+set_rig $'0, NVIDIA GeForce RTX 3090, 24576, 8.6'
+assert_model_status "qwen3.6-27b" "ok|fits your rig"
+assert_model_status "gemma-4-31b" "no|" "needs 32 GB+ on single card OR 2× 24 GB"
+assert_contains "$(model_status "gemma-4-31b")" "1× RTX 3090, 24 GB"
+
+# Single 16 GB: neither shipped model has a viable compose.
+set_rig $'0, NVIDIA RTX 4060 Ti, 16384, 8.9'
+assert_model_status "qwen3.6-27b" "no|" "needs 20 GB+ VRAM"
+assert_model_status "gemma-4-31b" "no|" "needs 32 GB+ on single card OR 2× 24 GB"
+
+# Heterogeneous 16 + 24 GB: Qwen can run on the 24 GB card; Gemma dual cannot.
+set_rig $'0, NVIDIA RTX 4060 Ti, 16384, 8.9\n1, NVIDIA GeForce RTX 3090, 24576, 8.6'
+assert_model_status "qwen3.6-27b" "ok|fits your rig"
+assert_model_status "gemma-4-31b" "no|" "RTX 4060 Ti, 16 GB + RTX 3090, 24 GB"
+
+# 32 GB+ modern card: Gemma's single-card compose is eligible.
+set_rig $'0, NVIDIA GeForce RTX 5090, 32768, 12.0'
+assert_model_status "qwen3.6-27b" "ok|fits your rig"
+assert_model_status "gemma-4-31b" "ok|fits your rig"
+
+# Non-TTY no-arg setup fails fast with usage rather than hanging.
+if out="$(echo | bash "${ROOT_DIR}/scripts/setup.sh" 2>&1)"; then
+  echo "ASSERTION FAILED: non-TTY no-arg setup unexpectedly succeeded" >&2
+  echo "$out" >&2
+  exit 1
+fi
+assert_contains "$out" "Usage:"
+assert_contains "$out" "Interactive picker available in a TTY shell"
+
+# Positional setup path remains non-interactive and reaches the existing flow.
+set_rig $'0, NVIDIA GeForce RTX 3090, 24576, 8.6'
+out="$(MODEL_DIR="${TMP_DIR}/models" PREFLIGHT_DISK_GB=0 SKIP_GENESIS=1 SKIP_MODEL=1 bash "${ROOT_DIR}/scripts/setup.sh" qwen3.6-27b 2>&1)"
+assert_not_contains "$out" "Which model to download?"
+assert_contains "$out" "[model]   SKIP_MODEL=1"
+
+# The launch wizard's variant-display step marks hardware viability and defaults
+# to the single-card long-text recommendation on a single 24 GB card.
+out="$(printf '\n' | SWITCH="${TMP_DIR}/switch-mock" bash "${ROOT_DIR}/scripts/launch.sh" --no-preflight --no-verify --engine vllm --cards 1 2>&1)"
+assert_contains "$out" "Long ctx, text only — Balanced MTP"
+assert_contains "$out" "[default]"
+assert_contains "$out" "vllm/dual"
+assert_contains "$out" "✗ needs 2× 24 GB"
+assert_contains "$out" "SWITCHED vllm/long-text"
+
+# TTY-backed no-arg setup supports the cosmetic but real "Both" choice by
+# dispatching through the positional path for both model families.
+if ! command -v script >/dev/null 2>&1; then
+  echo "ASSERTION FAILED: util-linux 'script' is required for TTY picker coverage" >&2
+  exit 1
+fi
+set_rig $'0, NVIDIA GeForce RTX 3090, 24576, 8.6\n1, NVIDIA GeForce RTX 3090, 24576, 8.6'
+export MODEL_DIR="${TMP_DIR}/models"
+export PREFLIGHT_DISK_GB=0
+export SKIP_GENESIS=1
+export SKIP_MODEL=1
+out="$(printf '3\n' | script -qec "bash '${ROOT_DIR}/scripts/setup.sh'" /dev/null 2>&1)"
+assert_contains "$out" "[setup] Which model to download?"
+assert_contains "$out" "Both"
+assert_contains "$out" "[setup] downloading both supported models"
+skip_count="$(grep -c "\[model\]   SKIP_MODEL=1" <<< "$out" || true)"
+if [[ "$skip_count" != "2" ]]; then
+  echo "ASSERTION FAILED: expected Both choice to dispatch two model setup runs, got ${skip_count}" >&2
+  echo "--- output ---" >&2
+  echo "$out" >&2
+  exit 1
+fi
+
+echo "test-setup-picker: ok"
