@@ -273,3 +273,6 @@ echo "  verify-stress: tail -5 $OUT_DIR/verify-stress.log"
 echo "  quality:       grep '^Quality:' $OUT_DIR/quality-full.log"
 echo "  soak:          grep -E 'verdict|silent_empty|p50_decode' $OUT_DIR/soak.log"
 echo "  aider:         grep 'aider-polyglot-30' $OUT_DIR/aider-polyglot.log"
+echo
+echo "To submit your numbers (review then PR):"
+echo "  bash scripts/submit-bench.sh --tag $TAG"

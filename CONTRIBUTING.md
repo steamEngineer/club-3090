@@ -45,6 +45,28 @@ Two GitHub channels, two different shapes of conversation. Picking the right one
 
 ---
 
+## Submitting your bench
+
+After running `bash scripts/rebench-full.sh`, contribute your numbers to `BENCHMARKS.md` with:
+
+```bash
+bash scripts/submit-bench.sh --tag <your-tag>
+```
+
+This generates a paste-ready row at `results/rebench/<tag>/BENCHMARKS-row.md`. Review it, then either auto-submit or open the PR manually.
+
+Auto-submit opens a PR via GitHub CLI:
+
+```bash
+bash scripts/submit-bench.sh --tag <your-tag> --auto-submit
+```
+
+Manual path: paste the row into the appropriate `BENCHMARKS.md` section and open a PR yourself.
+
+Auto-submit assumes `gh auth status` is configured. If it is not, run `gh auth login` first.
+
+---
+
 ## Process for non-trivial changes
 
 1. **Open an issue first** for anything bigger than a typo fix or a one-line measurement contribution. We'll either align on shape or explain why we'd land it differently — saves you a wasted afternoon.
