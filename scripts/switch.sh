@@ -53,6 +53,7 @@ set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE_BIN="${COMPOSE_BIN:-docker compose}"
 READY_TIMEOUT="${READY_TIMEOUT:-600}"
+LAUNCH_PROFILE="${LAUNCH_PROFILE:-${ROOT_DIR}/scripts/lib/profiles/launch_compat.py}"
 
 # Load .env if present, so PORT / MODEL_DIR / etc. flow through to docker
 # compose AND to the ready-URL probe below.
@@ -225,6 +226,27 @@ gpu_preflight() {
   fi
 }
 
+export_variant_engine_pin() {
+  local variant="$1" output line key value
+  [[ "$variant" == vllm/* ]] || return 0
+  if ! output="$(python3 "$LAUNCH_PROFILE" resolve-variant-pin --variant "$variant" --format shell 2>&1)"; then
+    echo "$output" >&2
+    exit 2
+  fi
+  while IFS='=' read -r key value; do
+    [[ -n "$key" ]] || continue
+    case "$key" in
+      VLLM_NIGHTLY_SHA) export VLLM_NIGHTLY_SHA="$value" ;;
+      *) echo "[switch] ERROR: unexpected engine pin export: $key" >&2; exit 2 ;;
+    esac
+  done <<< "$output"
+  if [[ -n "${VLLM_IMAGE:-}" ]]; then
+    echo "[switch] vLLM image override: ${VLLM_IMAGE} (profile nightly SHA ${VLLM_NIGHTLY_SHA})"
+  else
+    echo "[switch] vLLM nightly SHA: ${VLLM_NIGHTLY_SHA}"
+  fi
+}
+
 up_variant() {
   local v="$1"
   if [[ -z "${VARIANTS[$v]:-}" ]]; then
@@ -260,6 +282,7 @@ up_variant() {
   gpu_preflight
 
   echo "[switch] bringing up: ${v}  (${dir}/${file})"
+  export_variant_engine_pin "$v"
   (cd "${full_dir}" && ${COMPOSE_BIN} -f "${file}" up -d)
 }
 

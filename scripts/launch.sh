@@ -902,6 +902,22 @@ validate_selected_variant() {
   "${cmd[@]}"
 }
 
+export_variant_engine_pin() {
+  local variant="$1" output line key value
+  [[ "$variant" == vllm/* ]] || return 0
+  if ! output="$(python3 "$LAUNCH_PROFILE" resolve-variant-pin --variant "$variant" --format shell 2>&1)"; then
+    echo "$output" >&2
+    exit 2
+  fi
+  while IFS='=' read -r key value; do
+    [[ -n "$key" ]] || continue
+    case "$key" in
+      VLLM_NIGHTLY_SHA) export VLLM_NIGHTLY_SHA="$value" ;;
+      *) echo "[launch] ERROR: unexpected engine pin export: $key" >&2; exit 2 ;;
+    esac
+  done <<< "$output"
+}
+
 if [[ "$ESTATE_MODE" -eq 1 || -n "$ESTATE_FILE" ]]; then
   if [[ "$ESTATE_MODE" -eq 1 ]]; then
     _estate_cmd=(python3 "$ESTATE_HELPER" wizard)
@@ -983,6 +999,7 @@ fi
 if [[ -n "$PP_VALUE" ]]; then
   export PP="$PP_VALUE"
 fi
+export_variant_engine_pin "$VARIANT"
 "$SWITCH" "$VARIANT"
 
 # Resolve the actual endpoint port + container name the same way switch.sh

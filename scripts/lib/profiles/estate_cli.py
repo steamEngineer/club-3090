@@ -38,7 +38,7 @@ from scripts.lib.profiles.compat import (  # noqa: E402
     validate_estate,
 )
 from scripts.lib.profiles.compose_registry import COMPOSE_REGISTRY  # noqa: E402
-from scripts.lib.profiles.launch_compat import _hardware_id_from_gpu  # noqa: E402
+from scripts.lib.profiles.launch_compat import _hardware_id_from_gpu, resolve_engine_pin  # noqa: E402
 
 
 SUPPORTED_ESTATE_SCHEMA_VERSIONS = {1}
@@ -340,6 +340,12 @@ def compose_env(inst: InstanceSpec) -> dict[str, str]:
             "PORT": str(inst.port),
         }
     )
+    entry = COMPOSE_REGISTRY.get(inst.compose_name)
+    if entry:
+        profiles = load_profiles()
+        engine = profiles.engines[entry["engine"]]
+        if engine.type == "vllm":
+            env.update(resolve_engine_pin(profiles, entry["engine"]))
     return env
 
 
