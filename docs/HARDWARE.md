@@ -111,6 +111,8 @@ For dual-card: combined power at 330W cap each = ~660W under heavy load — veri
 
 ### Cross-rig power-cap data (anchor points)
 
+> **Note on 3090 stock TDP variants** (flagged 2026-05-14 by @Mateleo, [disc #129](https://github.com/noonghunna/club-3090/discussions/129)): rows showing **370W stock / 390W max** for @noonghunna's 3090 are specific to a high-OC SKU (this rig's card). **Reference / Founders Edition 3090s top out at 350W stock**. The efficiency-knee findings (290W decode sweet spot, 250W prefill sweet spot) hold across variants — those are workload-class properties of the SM 8.6 silicon, not card-model dependent. Only the absolute "stock" and "max" power numbers shift with SKU.
+
 Run `sudo bash scripts/power-cap-sweep.sh --cooling air|water|aio` on a new rig to add a row. The script auto-detects the running container/model/URL, sweeps a configurable cap range, and emits a paste-ready markdown summary at `/tmp/power-cap-summary.md`. See [`scripts/power-cap-sweep.sh`](../scripts/power-cap-sweep.sh).
 
 **Canonical cross-rig anchor command** (production-grade data — what to paste into [disc #86](https://github.com/noonghunna/club-3090/discussions/86) for a real cross-rig efficiency anchor):
