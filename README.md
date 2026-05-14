@@ -189,6 +189,14 @@ club-3090/
 | NVIDIA driver 580.x+ | For CUDA 13 runtime in vLLM nightly. |
 | ~30 GB free disk | Per model. More for multiple models. |
 
+vLLM image pins live in `scripts/lib/profiles/engines/*.yml` and are exported
+by `scripts/launch.sh` / `scripts/switch.sh` as `VLLM_NIGHTLY_SHA`. To opt into
+the pre-built club image after CI has promoted it, override the full image ref:
+
+```bash
+VLLM_IMAGE=ghcr.io/noonghunna/vllm-club3090:latest bash scripts/launch.sh --variant vllm/dual
+```
+
 See [docs/HARDWARE.md](docs/HARDWARE.md) for hardware-specific notes (PCIe vs NVLink, power draw, etc.).
 
 ---

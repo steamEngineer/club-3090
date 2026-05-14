@@ -87,6 +87,21 @@ On a green build, the workflow:
 If any smoke step fails, the dated image remains available for debugging and the
 rolling aliases do not move.
 
+## Using The GHCR Image
+
+The pre-built GHCR image is opt-in. Normal launches use the upstream vLLM
+nightly SHA resolved from `scripts/lib/profiles/engines/<engine-id>.yml`.
+
+To force a verified club image after this workflow has moved `latest` forward:
+
+```bash
+VLLM_IMAGE=ghcr.io/noonghunna/vllm-club3090:latest bash scripts/launch.sh --variant vllm/dual
+```
+
+`VLLM_IMAGE` is a full image reference override. The launcher still exports
+`VLLM_NIGHTLY_SHA` from the matching EngineProfile, but Docker Compose uses
+`VLLM_IMAGE` first.
+
 ## Existing Containers
 
 The runner should be dedicated to CI. Before booting the canonical compose, the
