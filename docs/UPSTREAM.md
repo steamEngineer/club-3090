@@ -57,14 +57,15 @@ image: ${VLLM_IMAGE:-vllm/vllm-openai:nightly-${VLLM_NIGHTLY_SHA}}
 `scripts/launch.sh`, `scripts/switch.sh`, and estate boot resolve
 `VLLM_NIGHTLY_SHA` from `scripts/lib/profiles/engines/<engine-id>.yml →
 install.spec`. `VLLM_IMAGE` is a full-image override for users who want to opt
-into the pre-built GHCR image after the CI smoke has moved `latest` forward.
+into the pre-built GHCR image. The `:club-vX.Y.Z` release tags are the
+recommended pinned target; `:latest` follows the most-recent dated nightly.
 
 | Pin source | Composes using it | Reason for pin | Retirement candidate? |
 |---|---|---|---|
 | `scripts/lib/profiles/engines/vllm-nightly-mtp.yml` → `vllm/vllm-openai:nightly-1acd67a7...` | MTP vLLM composes | Post-#41745 nightly for Qwen and Gemma MTP paths. | Bump this YAML when a newer upstream nightly absorbs the required local fixes. |
 | `scripts/lib/profiles/engines/vllm-nightly-dflash.yml` → `vllm/vllm-openai:nightly-e47c98ef...` | DFlash vLLM composes | DFlash overlay baseline. | Bump this YAML after DFlash overlay drift is revalidated. |
 | `scripts/lib/profiles/engines/vllm-nightly-full.yml` → `vllm/vllm-openai:nightly-e47c98ef...` | full-overlay vLLM composes | INT8 PTH + DFlash coexistence overlay baseline. | Bump this YAML when #42102/#41703/#35936/#40361 land and the overlay surface shrinks. |
-| `VLLM_IMAGE=ghcr.io/noonghunna/vllm-club3090:latest` | opt-in override for any vLLM compose | v0.7.0 pre-built image path. CI vendors the overlay set and only moves `latest` / `nightly-stable` after GPU smoke passes. | Optional. It is not the default boot path. |
+| `VLLM_IMAGE=ghcr.io/noonghunna/vllm-club3090:club-vX.Y.Z` (or `:latest`) | opt-in override for any vLLM compose | Pre-built image with vendored overlays baked in. Release tags (`:club-v0.7.0`, etc.) are immutable; `:latest` follows the most-recent dated nightly. See `docs/CI_RUNNER_SETUP.md`. | Optional. It is not the default boot path. |
 | `ghcr.io/ggml-org/llama.cpp:server-cuda` | 2 (Qwen 3.6-27B llama-cpp) | Stable tag, no hash drift on upstream side. No patches mounted. | Not a retirement candidate — drift-free. Capture digest if reproducibility matters. |
 
 **Retirement workflow:** see [`NIGHTLY_BUMP_RUNBOOK.md`](./NIGHTLY_BUMP_RUNBOOK.md).

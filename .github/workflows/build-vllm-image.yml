@@ -7,15 +7,6 @@ on:
         description: "Upstream vLLM image to vendor overlays into"
         required: false
         default: "vllm/vllm-openai:nightly-1acd67a795ebccdf9b9db7697ae9082058301657"
-      smoke:
-        description: "GPU smoke behavior"
-        required: false
-        default: "auto"
-        type: choice
-        options:
-          - auto
-          - skip
-          - required
   schedule:
     - cron: "0 0 * * 0"
   push:
@@ -36,14 +27,12 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  actions: read
   contents: read
   packages: write
 
 env:
   IMAGE_NAME: ghcr.io/noonghunna/vllm-club3090
   DEFAULT_VLLM_BASE_IMAGE: vllm/vllm-openai:nightly-1acd67a795ebccdf9b9db7697ae9082058301657
-  CANONICAL_COMPOSE: models/qwen3.6-27b/vllm/compose/dual/docker-compose.yml
 
 jobs:
   build:
@@ -111,80 +100,11 @@ jobs:
             org.opencontainers.image.version=${{ steps.meta.outputs.image_tag }}
             club3090.upstream_vllm_image=${{ steps.meta.outputs.upstream_image }}
 
-  detect-smoke-runner:
-    name: Detect self-hosted GPU runner
+  promote-aliases:
+    name: Promote latest and nightly-stable
     needs: build
     runs-on: ubuntu-latest
-    outputs:
-      available: ${{ steps.detect.outputs.available }}
-      smoke_mode: ${{ steps.detect.outputs.smoke_mode }}
     steps:
-      - name: Detect online gpu-labeled runner
-        id: detect
-        uses: actions/github-script@v7
-        env:
-          SMOKE_MODE: ${{ inputs.smoke || 'auto' }}
-        with:
-          script: |
-            const mode = process.env.SMOKE_MODE || "auto";
-            core.setOutput("smoke_mode", mode);
-
-            if (mode === "skip") {
-              core.notice("Smoke explicitly skipped. Dated image was pushed; aliases will not move.");
-              core.setOutput("available", "false");
-              return;
-            }
-
-            const runners = await github.paginate(
-              github.rest.actions.listSelfHostedRunnersForRepo,
-              {
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                per_page: 100,
-              },
-            );
-
-            const available = runners.some((runner) => {
-              const labels = runner.labels.map((label) => label.name.toLowerCase());
-              return runner.status === "online" &&
-                labels.includes("self-hosted") &&
-                labels.includes("gpu");
-            });
-
-            core.setOutput("available", available ? "true" : "false");
-            if (!available) {
-              const message = "No online self-hosted runner with label 'gpu' was found. Dated image was pushed; latest/nightly-stable were not moved.";
-              if (mode === "required") {
-                core.setFailed(message);
-              } else {
-                core.notice(message);
-              }
-            }
-
-  smoke:
-    name: GPU smoke and alias promotion
-    needs:
-      - build
-      - detect-smoke-runner
-    if: needs.detect-smoke-runner.outputs.available == 'true'
-    runs-on:
-      - self-hosted
-      - linux
-      - x64
-      - gpu
-    timeout-minutes: 120
-    env:
-      IMAGE_REF: ${{ needs.build.outputs.image_ref }}
-      IMAGE_NAME: ghcr.io/noonghunna/vllm-club3090
-      COMPOSE_PROJECT_NAME: club3090-ci-vllm-dual
-      COMPOSE_OVERRIDE: /tmp/club3090-ci-vllm-image.override.yml
-      URL: http://localhost:8010
-      MODEL: qwen3.6-27b-autoround
-      CONTAINER: vllm-qwen36-27b-dual
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -192,125 +112,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Prepare canonical compose override
+      - name: Promote :latest and :nightly-stable to dated tag
         shell: bash
+        env:
+          IMAGE_REF: ${{ needs.build.outputs.image_ref }}
         run: |
           set -euo pipefail
-          docker pull "${IMAGE_REF}"
-          cat > "${COMPOSE_OVERRIDE}" <<EOF
-          services:
-            vllm-qwen36-27b-dual:
-              image: ${IMAGE_REF}
-          EOF
-
-      - name: Stop prior club-3090 estate if present
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -f "${HOME}/.club3090/estate.yml" ]]; then
-            bash scripts/launch.sh --down-estate "${HOME}/.club3090/estate.yml" || true
-          fi
-          docker compose \
-            -f "${CANONICAL_COMPOSE}" \
-            -f "${COMPOSE_OVERRIDE}" \
-            -p "${COMPOSE_PROJECT_NAME}" \
-            down --remove-orphans || true
-
-      - name: Boot canonical dual vLLM compose
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker compose \
-            -f "${CANONICAL_COMPOSE}" \
-            -f "${COMPOSE_OVERRIDE}" \
-            -p "${COMPOSE_PROJECT_NAME}" \
-            up -d
-
-      - name: Wait for OpenAI endpoint
-        shell: bash
-        run: |
-          set -euo pipefail
-          for _ in {1..120}; do
-            if curl -sf -m 5 "${URL}/v1/models" >/dev/null; then
-              exit 0
-            fi
-            sleep 10
-          done
-          docker compose \
-            -f "${CANONICAL_COMPOSE}" \
-            -f "${COMPOSE_OVERRIDE}" \
-            -p "${COMPOSE_PROJECT_NAME}" \
-            logs --tail=200
-          exit 1
-
-      - name: Run verify-full
-        shell: bash
-        run: |
-          set -euo pipefail
-          URL="${URL}" MODEL="${MODEL}" CONTAINER="${CONTAINER}" bash scripts/verify-full.sh
-
-      - name: Run 3-prompt smoke bench
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import json
-          import time
-          import urllib.request
-
-          url = "http://localhost:8010"
-          model = "qwen3.6-27b-autoround"
-          prompts = [
-              ("narrative", "Write a concise paragraph explaining transformer attention.", 96),
-              ("code", "Write a small Python function that returns the nth Fibonacci number.", 96),
-              ("reasoning", "A train leaves at 08:00 traveling 60 km/h. Another leaves at 09:00 traveling 90 km/h. When does the second catch up?", 96),
-          ]
-
-          for label, prompt, max_tokens in prompts:
-              body = json.dumps({
-                  "model": model,
-                  "messages": [{"role": "user", "content": prompt}],
-                  "max_tokens": max_tokens,
-                  "temperature": 0.3,
-                  "stream": False,
-                  "chat_template_kwargs": {"enable_thinking": False},
-              }).encode()
-              req = urllib.request.Request(
-                  f"{url}/v1/chat/completions",
-                  data=body,
-                  headers={"Content-Type": "application/json"},
-              )
-              start = time.time()
-              with urllib.request.urlopen(req, timeout=300) as response:
-                  data = json.load(response)
-              wall = time.time() - start
-              usage = data.get("usage") or {}
-              tokens = usage.get("completion_tokens") or 0
-              text = data["choices"][0]["message"].get("content") or ""
-              if not text.strip():
-                  raise SystemExit(f"{label}: empty completion")
-              tps = tokens / wall if wall > 0 else 0
-              print(f"{label}: wall={wall:.2f}s completion_tokens={tokens} wall_TPS={tps:.2f}")
-          PY
-
-      - name: Promote latest aliases
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker tag "${IMAGE_REF}" "${IMAGE_NAME}:latest"
-          docker tag "${IMAGE_REF}" "${IMAGE_NAME}:nightly-stable"
-          docker push "${IMAGE_NAME}:latest"
-          docker push "${IMAGE_NAME}:nightly-stable"
-
-      - name: Cleanup canonical compose
-        if: always()
-        shell: bash
-        run: |
-          docker compose \
-            -f "${CANONICAL_COMPOSE}" \
-            -f "${COMPOSE_OVERRIDE}" \
-            -p "${COMPOSE_PROJECT_NAME}" \
-            down --remove-orphans || true
+          docker buildx imagetools create \
+            -t "${IMAGE_NAME}:latest" \
+            -t "${IMAGE_NAME}:nightly-stable" \
+            "${IMAGE_REF}"
 
   retention:
     name: Retain four weeks of dated nightlies

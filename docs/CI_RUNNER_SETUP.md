@@ -1,127 +1,116 @@
-# Club-3090 CI GPU Runner Setup
+# Club-3090 vLLM Image — Build + Distribution
 
-The vLLM image workflow builds on GitHub-hosted Ubuntu, then optionally smokes the
-fresh image on a self-hosted GPU runner. If no runner is registered, the workflow
-still pushes the dated `nightly-YYYYMMDD-clubXXXX` image and leaves `latest` /
-`nightly-stable` untouched.
+The vLLM image workflow (`.github/workflows/build-vllm-image.yml`) builds on
+GitHub-hosted Ubuntu, applies vendored overlays via Dockerfile, pushes a dated
+nightly tag to GHCR, then promotes the `:latest` and `:nightly-stable` aliases
+to point at the just-built dated tag. No self-hosted runner required.
 
-## Runner Requirements
+The release-pinned tag `:club-vX.Y.Z` is created automatically when the workflow
+runs on a Git tag push (e.g. `v0.7.0`).
 
-- Linux x86_64 host with Docker Engine and Docker Compose v2.
-- NVIDIA driver and NVIDIA Container Toolkit installed.
-- At least two 24 GB NVIDIA GPUs for the canonical `qwen3.6-27b/vllm/dual`
-  smoke. The production validation target is 2x RTX 3090.
-- Enough local storage for the vLLM image, model cache, Docker layers, and
-  compile caches. Plan for at least 250 GB free.
-- A dedicated runner host. Do not run untrusted pull-request jobs on this
-  machine.
+## Tag conventions
 
-## Labels
+| Tag | Mutable? | What it represents | Recommended for |
+|---|---|---|---|
+| `nightly-YYYYMMDD-clubNNNN` | Immutable | A specific build of upstream nightly + our overlays | Reproducibility; pin in `VLLM_IMAGE` to lock to a known state |
+| `:latest` | Mutable | The most-recent dated nightly | Users who want bleeding-edge; expect occasional breakage |
+| `:nightly-stable` | Mutable | Same target as `:latest` today; reserved for future divergence | Same as `:latest` for now |
+| `:club-vX.Y.Z` | Immutable (per release) | Built on the v0.7.0 tag push and never moves | Users who want verified releases; this is the recommended path |
 
-Register the runner with the normal self-hosted labels plus `gpu`:
+## Why no smoke-gating?
 
-```text
-self-hosted
-linux
-x64
-gpu
-```
+The workflow originally tried to gate `:latest` promotion on a self-hosted GPU
+runner running `verify-full.sh` + a 3-prompt smoke. That added:
 
-The workflow checks for an online runner with `self-hosted` and `gpu`; the smoke
-job itself targets `[self-hosted, linux, x64, gpu]`.
+- A dependency on infra (the runner) we don't maintain.
+- A permission requirement (`administration: read` to list runners) the default `GITHUB_TOKEN` lacks.
+- A failure mode where `:latest` never gets promoted if no runner is registered.
 
-## Registration
+We dropped smoke-gating in v0.7.1 (issue #135) because:
 
-1. Open the GitHub repository.
-2. Go to **Settings -> Actions -> Runners -> New self-hosted runner**.
-3. Choose Linux x64 and follow GitHub's generated commands.
-4. Add the `gpu` label during configuration, or add it later from the runner UI.
-5. Install the runner as a service:
+1. The build step itself catches the most common failure modes (missing patch
+   source, invalid Dockerfile, overlay path mismatches).
+2. Users who want verified images use `:club-vX.Y.Z` release tags, not `:latest`.
+3. The Docker Hub convention is that `:latest` = "most recent, no guarantees".
 
-```bash
-sudo ./svc.sh install
-sudo ./svc.sh start
-```
+If a self-hosted GPU runner ever becomes available, smoke-gating can be layered
+on top of this workflow as a separate post-build job — the simpler design today
+doesn't preclude it.
 
-The runner user must be able to run Docker commands. On a typical Ubuntu host:
+## Using the GHCR image
 
-```bash
-sudo usermod -aG docker "$USER"
-newgrp docker
-```
+The pre-built GHCR image is **opt-in**. Default launches use the upstream vLLM
+nightly SHA resolved from `scripts/lib/profiles/engines/<engine-id>.yml →
+install.spec` (the standard `vllm/vllm-openai:nightly-<sha>` ref).
 
-Restart the runner service after changing group membership.
-
-## Host Preflight
-
-Run these on the runner host before enabling the smoke job:
+To use the verified release image:
 
 ```bash
-nvidia-smi
-docker compose version
-docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu24.04 nvidia-smi
+VLLM_IMAGE=ghcr.io/noonghunna/vllm-club3090:club-v0.7.0 \
+  bash scripts/launch.sh --variant vllm/dual
 ```
 
-Then clone this repository at the path used by the runner workspace once and
-make sure the model cache is present or mounted at the compose default:
+To use the bleeding-edge `:latest` (rebuilt on every overlay change + weekly):
 
 ```bash
-ls -ld models-cache
+VLLM_IMAGE=ghcr.io/noonghunna/vllm-club3090:latest \
+  bash scripts/launch.sh --variant vllm/dual
 ```
 
-If your cache lives elsewhere, set `MODEL_DIR` in the runner service
-environment. The canonical compose reads `${MODEL_DIR:-../../../../../models-cache}`.
-
-## What The Smoke Job Does
-
-On a green build, the workflow:
-
-1. Pulls `ghcr.io/noonghunna/vllm-club3090:nightly-YYYYMMDD-clubXXXX`.
-2. Boots `models/qwen3.6-27b/vllm/compose/dual/docker-compose.yml` with a
-   temporary compose override that points at the dated image.
-3. Waits for `http://localhost:8010/v1/models`.
-4. Runs `bash scripts/verify-full.sh`.
-5. Runs a three-prompt OpenAI-compatible smoke bench.
-6. Only then retags the image as `latest` and `nightly-stable`.
-
-If any smoke step fails, the dated image remains available for debugging and the
-rolling aliases do not move.
-
-## Using The GHCR Image
-
-The pre-built GHCR image is opt-in. Normal launches use the upstream vLLM
-nightly SHA resolved from `scripts/lib/profiles/engines/<engine-id>.yml`.
-
-To force a verified club image after this workflow has moved `latest` forward:
-
-```bash
-VLLM_IMAGE=ghcr.io/noonghunna/vllm-club3090:latest bash scripts/launch.sh --variant vllm/dual
-```
-
-`VLLM_IMAGE` is a full image reference override. The launcher still exports
+`VLLM_IMAGE` is a full image-reference override. The launcher still exports
 `VLLM_NIGHTLY_SHA` from the matching EngineProfile, but Docker Compose uses
-`VLLM_IMAGE` first.
+`VLLM_IMAGE` first when present.
 
-## Existing Containers
+## Workflow triggers
 
-The runner should be dedicated to CI. Before booting the canonical compose, the
-workflow tears down the default club-3090 estate if `~/.club3090/estate.yml`
-exists, then runs `docker compose down` for the CI project name. Avoid running
-manual workloads on the same host while the workflow is active.
+The workflow runs on:
 
-## Registry Permissions
+- **`workflow_dispatch`** — manual `gh workflow run build-vllm-image.yml` for ad-hoc rebuilds
+- **`schedule`** — weekly, Sunday 00:00 UTC
+- **`push`** to master when `.github/workflows/build-vllm-image.yml`, `docker/vllm-club3090/**`, or `models/*/vllm/patches/**` change
+- **`push`** of any tag matching `v0.7.*`, `v0.[8-9].*`, or `v[1-9]*` — adds the `:club-vX.Y.Z` release tag
 
-The workflow uses `GITHUB_TOKEN` with `packages: write` to push GHCR images and
-move aliases. No personal access token is required for the repository-owned
-package.
+## Workflow permissions
+
+`GITHUB_TOKEN` with default `contents: read` + `packages: write` is sufficient.
+No `administration: read` is needed (we removed the runner detection that
+required it). No personal access tokens required.
+
+## Manual `:latest` bootstrap (recovery)
+
+If `:latest` ever gets out of sync with the most-recent dated nightly (e.g.
+during this workflow's redesign migration), you can manually re-tag a dated
+nightly as `:latest` without re-building:
+
+```bash
+docker login ghcr.io --username "${GITHUB_USERNAME}" --password-stdin <<< "${GITHUB_TOKEN}"
+
+docker buildx imagetools create \
+  -t ghcr.io/noonghunna/vllm-club3090:latest \
+  -t ghcr.io/noonghunna/vllm-club3090:nightly-stable \
+  ghcr.io/noonghunna/vllm-club3090:nightly-YYYYMMDD-clubXXXX
+```
+
+Replace `nightly-YYYYMMDD-clubXXXX` with the dated tag you want to bless as
+`:latest`. List recent tags via:
+
+```bash
+gh api -H 'Accept: application/vnd.github+json' \
+  /users/noonghunna/packages/container/vllm-club3090/versions | \
+  jq -r '.[] | .metadata.container.tags[]' | head -20
+```
+
+(This requires `read:packages` scope on the token. Without it, list tags via the
+GHCR web UI: https://github.com/noonghunna/club-3090/pkgs/container/vllm-club3090.)
 
 ## Retention
 
 The scheduled workflow keeps:
 
-- `latest`
-- `nightly-stable`
-- every `club-v*` release tag
-- dated `nightly-YYYYMMDD-clubXXXX` tags from the last four weeks
+- `:latest`
+- `:nightly-stable`
+- every `:club-v*` release tag
+- dated `nightly-YYYYMMDD-clubNNNN` tags from the last four weeks
 
-Older dated nightly package versions are deleted by the retention job.
+Older dated nightly versions are deleted by the retention job (runs only on the
+weekly schedule + `workflow_dispatch`, not on every push).
