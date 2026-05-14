@@ -1,0 +1,55 @@
+schema_version: 1
+id: qwen3.6-27b
+display_name: Qwen 3.6 27B
+family: qwen3-next-hybrid
+hidden_size: 5120
+num_hidden_layers: 64
+num_gdn_layers: 48
+num_attn_layers: 16
+num_attn_heads: 24
+num_kv_heads: 4
+head_dim_attn: 256
+linear_num_v_heads: 48
+linear_num_k_heads: 16
+linear_v_head_dim: 128
+linear_k_head_dim: 128
+linear_conv_kernel_dim: 4
+max_ctx_supported: 262144
+attention_k_eq_v: false
+weights:
+  autoround_int4:
+    path: qwen3.6-27b-autoround-int4
+    size_gb: 17.5
+    format: autoround
+    status: production
+  awq:
+    path: qwen3.6-27b-awq-int4
+    size_gb: 17.0
+    format: awq
+    status: experimental
+  gguf:
+    path: qwen3.6-27b-gguf
+    size_gb: variable
+    format: gguf
+    status: production
+  carnice_bf16mtp:
+    path: carnice-v2-27b-int4-recipe-d-bf16mtp
+    size_gb: 17.5
+    format: autoround
+    status: experimental
+  qwopus_bf16mtp:
+    path: qwopus3.6-27b-int4-recipe-d-bf16mtp
+    size_gb: 17.5
+    format: autoround
+    status: experimental
+default_weight_variant: autoround_int4
+compatible_drafters:
+  - qwen-mtp-builtin
+  - zlab-qwen-dflash
+  - unsloth-mtp-gguf
+valid_tp:
+  - 1
+  - 2
+  - 4
+requires_genesis: true
+

@@ -1,0 +1,14 @@
+schema_version: 1
+id: gemma-dflash
+display_name: z-lab Gemma 4 DFlash
+spec_method: dflash
+model_compat:
+  - gemma-4-31b
+n_default: 7
+n_max: 15
+download:
+  hf_repo: z-lab/gemma-4-31b-it-dflash
+  size_gb: 2.9
+  format: fp16
+vram_footprint_gb: 2.9
+status: experimental

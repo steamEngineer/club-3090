@@ -1,0 +1,15 @@
+schema_version: 1
+id: unsloth-mtp-gguf
+display_name: Unsloth Qwen 3.6 MTP GGUF
+spec_method: mtp_gguf
+model_compat:
+  - qwen3.6-27b
+engine_compat:
+  engine_type: llama-cpp
+n_default: 2
+n_max: 3
+download:
+  hf_repo: unsloth/Qwen3.6-27B-GGUF-MTP
+  size_gb: variable
+vram_footprint_gb: variable
+status: experimental

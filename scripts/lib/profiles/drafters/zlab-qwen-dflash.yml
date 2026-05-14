@@ -1,0 +1,14 @@
+schema_version: 1
+id: zlab-qwen-dflash
+display_name: z-lab Qwen 3.6 DFlash
+spec_method: dflash
+model_compat:
+  - qwen3.6-27b
+n_default: 7
+n_max: 15
+download:
+  hf_repo: z-lab/Qwen3.6-27B-DFlash
+  size_gb: 1.75
+  format: fp16
+vram_footprint_gb: 1.75
+status: experimental

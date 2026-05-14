@@ -1,0 +1,11 @@
+schema_version: 1
+id: qwen-mtp-builtin
+display_name: Qwen 3.6 27B built-in MTP head
+spec_method: mtp
+model_compat:
+  - qwen3.6-27b
+n_default: 3
+n_max: 3
+download: false
+vram_footprint_gb: 0
+status: production
