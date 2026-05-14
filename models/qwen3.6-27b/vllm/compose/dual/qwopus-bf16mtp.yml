@@ -40,7 +40,7 @@
 # Tensor-parallel: 2
 services:
   vllm-qwopus-bf16mtp:
-    image: vllm/vllm-openai:nightly-1acd67a795ebccdf9b9db7697ae9082058301657
+    image: ghcr.io/noonghunna/vllm-club3090:latest
     container_name: "${ESTATE_CONTAINER:-vllm-qwopus-bf16mtp}"
     restart: "no"
     ports:
