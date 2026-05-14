@@ -16,6 +16,27 @@ history; SemVer takes over from `v0.3.0` onward.
 
 ---
 
+## v0.6.1 — 2026-05-14
+
+
+### ✨ Features
+
+- feat(launch): add hardware-aware launcher ([5882bbe](https://github.com/noonghunna/club-3090/commit/5882bbef6f5ed7e8ceea450fa3a6b167a1bf4926))
+- feat(tools): extend kv-calc.py to multi-model (Qwen 3.6 + Gemma 4 31B) ([0d48dac](https://github.com/noonghunna/club-3090/commit/0d48dac818ba889f74b74df1c454bb961a123c37))
+
+
+### 📝 Documentation
+
+- docs: update launch.sh references for v0.6.1 wizard flow ([e299e70](https://github.com/noonghunna/club-3090/commit/e299e70451c8d146214a6560e582d0e174dd0ebc))
+
+
+### 🧹 Other
+
+- Merge codex/v0.6.1-launch into master ([056dcb6](https://github.com/noonghunna/club-3090/commit/056dcb643914fee6169b02b89cb420b038c29b0f))
+
+
+
+[Pin: `git checkout v0.6.1`] · [Full diff](https://github.com/noonghunna/club-3090/compare/v0.6.0...v0.6.1)
 ## v0.6.0 — 2026-05-13
 
 
