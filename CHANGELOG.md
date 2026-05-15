@@ -16,6 +16,33 @@ history; SemVer takes over from `v0.3.0` onward.
 
 ---
 
+## v0.7.4 — 2026-05-15
+
+
+### 🐛 Bug fixes
+
+- fix(vllm-pr35936): make overlay tolerate bf610c2f upstream drift (closes #144) ([421114b](https://github.com/noonghunna/club-3090/commit/421114b9ddb47288365d3c9e27931671a9755a47))
+
+
+### 📝 Documentation
+
+- docs(BENCHMARKS): @OVDEN13 dual.yml — PCIe Gen 4 x4+x8 asymmetric (#142) ([77802a3](https://github.com/noonghunna/club-3090/commit/77802a3d8ee18bfa72a0a929ba1e22de661d22eb))
+
+
+### 🧹 Maintenance
+
+- test(launch): re-align engine pin expectations after revert ([e7bca8e](https://github.com/noonghunna/club-3090/commit/e7bca8e035d03240d791626631bdaf7c2c2182fe))
+
+
+### 🧹 Other
+
+- Reapply "fix(qwen3.6-27b): route non-TQ3 composes to vllm-nightly-clean" ([d780410](https://github.com/noonghunna/club-3090/commit/d7804107c96f04fc0008dbab84332c2438349aa4))
+- Revert "test(launch): re-align engine pin expectations after revert" ([0c4260f](https://github.com/noonghunna/club-3090/commit/0c4260f53d5c84da51d758de9c5c2d1d2d99800c))
+- Revert "fix(qwen3.6-27b): route non-TQ3 composes to vllm-nightly-clean" ([d32e168](https://github.com/noonghunna/club-3090/commit/d32e168a89f21af0c4c9d447ea196efd0b2e42b6))
+
+
+
+[Pin: `git checkout v0.7.4`] · [Full diff](https://github.com/noonghunna/club-3090/compare/v0.7.3...v0.7.4)
 ## v0.7.3 — 2026-05-15
 
 
