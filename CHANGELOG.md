@@ -16,6 +16,16 @@ history; SemVer takes over from `v0.3.0` onward.
 
 ---
 
+## v0.7.2 — 2026-05-15
+
+
+### ✨ Features
+
+- feat(launch): add hardware topology advisor ([d116ba9](https://github.com/noonghunna/club-3090/commit/d116ba9ba3442482e0005bab9067d304b40e5e24))
+
+
+
+[Pin: `git checkout v0.7.2`] · [Full diff](https://github.com/noonghunna/club-3090/compare/v0.7.1...v0.7.2)
 ## v0.7.1 — 2026-05-15
 
 
