@@ -100,18 +100,36 @@ delta_state_bytes ≈ num_gdn_layers
 
 Three components per layer: K state + V state + conv1d kernel state. All four `linear_*` fields are in `config.json → text_config`. Concrete sizes for our models in per-model §"DeltaNet recurrent state" subsections — typically single-digit MB total, negligible vs activation peak.
 
+**Worked example — Qwen 3.6 35B-A3B at `max_num_seqs=1`:**
+
+```
+linear_num_k_heads = 16, linear_k_head_dim = 128       → 2,048 elements per layer
+linear_num_v_heads = 32, linear_v_head_dim = 128       → 4,096 elements per layer
+linear_conv_kernel_dim = 4                              → conv state = 4 × (2,048 + 4,096) = 24,576 elements
+num_gdn_layers = 30, fp32 (4 bytes), max_num_seqs = 1
+
+delta_state_bytes = 30 × (2,048 + 4,096 + 24,576) × 4 × 1
+                  = 30 × 30,720 × 4
+                  = 3,686,400 bytes
+                  ≈ 3.5 MB
+```
+
+Plug `max_num_seqs = 4` → ~14 MB. Both well below activation-peak scale.
+
 Per-model sections below derive each term concretely.
 
 ## Quick reference: per-token growing-KV bytes
 
 Headline numbers for the four shipping models, computed from each per-model formula in the deep sections. Useful for at-a-glance capacity planning.
 
-| Model | bf16 (TP=1 / TP=2) | fp8_e5m2 (TP=1 / TP=2) | INT8 PTH or TQ3 (TP=1 / TP=2) |
-|---|---:|---:|---:|
-| Qwen 3.6 27B | 65,536 B / 32,768 B | 32,768 B / 16,384 B | **13,927 B / 6,963 B** (TQ3) |
-| Qwen 3.6 35B-A3B (MoE) | 20,480 B / 10,240 B | 10,240 B / 5,120 B | **4,352 B / 2,176 B** (TQ3) |
-| Gemma 4 31B | 163,840 B / 81,920 B | 81,920 B / 40,960 B | ~82,700 B / ~41,400 B (INT8 PTH) |
-| Gemma 4 26B-A4B (MoE) | **10,240 B / 5,120 B** | 5,120 B / 2,560 B | ~5,170 B / ~2,585 B (INT8 PTH) |
+| Model | bf16 (TP=1 / TP=2) | fp8_e5m2 (TP=1 / TP=2) | INT8 PTH or TQ3 (TP=1 / TP=2) | Vs Qwen 27B† |
+|---|---:|---:|---:|---:|
+| Qwen 3.6 27B | 65,536 B / 32,768 B | 32,768 B / 16,384 B | **13,927 B / 6,963 B** (TQ3) | **1.00×** (baseline) |
+| Qwen 3.6 35B-A3B (MoE) | 20,480 B / 10,240 B | 10,240 B / 5,120 B | **4,352 B / 2,176 B** (TQ3) | **0.31×** (~3.2× lighter) |
+| Gemma 4 31B | 163,840 B / 81,920 B | 81,920 B / 40,960 B | ~82,700 B / ~41,400 B (INT8 PTH) | **2.50×** (~2.5× heavier) |
+| Gemma 4 26B-A4B (MoE) | **10,240 B / 5,120 B** | 5,120 B / 2,560 B | ~5,170 B / ~2,585 B (INT8 PTH) | **0.16×** (~6.4× lighter) |
+
+† Ratio at fp8_e5m2 TP=2 — pick this as the comparison anchor because it's a common production config. Ratios shift slightly under other formats but the family hierarchy is stable.
 
 **What jumps out:**
 
