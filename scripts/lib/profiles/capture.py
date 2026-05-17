@@ -68,6 +68,13 @@ class SmokeResult:
     # {<cap>: "green" | "red" | "unsmoked"}
     results: dict[str, str] = field(default_factory=dict)
     partial: bool = False
+    # ADDITIVE (E3-fix): per-capability failure diagnostic for `red` probes
+    # — {<cap>: {"status": int|None, "error": str}}. Populated ONLY for
+    # capabilities that probed `red`; absent for green/unsmoked caps. This
+    # is consumed by the §6.1 classifier `[F]` will build + on-rig E5
+    # diagnosis. It does NOT alter the locked `results`/`partial`/
+    # `smoke_capability_set` shape (CONTRACT-4 + [F] recon depend on those).
+    results_detail: dict[str, dict] = field(default_factory=dict)
 
 
 def _config_declares(der: Any, cap: str) -> bool:
@@ -136,8 +143,33 @@ def _config_declares(der: Any, cap: str) -> bool:
     return False
 
 
+def _resolve_served_model_name(einput, compose_meta: Optional[dict]) -> str:
+    """The model name the probe MUST send in the OpenAI `model` field — it
+    has to be the EXACT value `generate_from_profile` emitted for
+    `--served-model-name`, or vLLM 404s the request (the on-rig E5 defect:
+    a healthy booted server, but `model:"derived"` is an unknown served
+    name -> HTTP 404 -> every floor probe `red`).
+
+    Authoritative source priority (CONTRACT-4 / brief):
+      (a) `compose_meta['served_model_name']` — the literal value the
+          generator emitted (preferred when the smoke path has it);
+      (b) `sanitize_slug(einput.slug)` — the SAME function
+          `generate_compose._sanitize_slug` mirrors, so it is identical to
+          what `--served-model-name` carries. No third derivation.
+    """
+    if compose_meta:
+        smn = compose_meta.get("served_model_name")
+        if isinstance(smn, str) and smn:
+            return smn
+    return sanitize_slug(einput.slug)
+
+
 def smoke_derived(
-    einput, endpoint: str, *, client: Optional[Any] = None
+    einput,
+    endpoint: str,
+    *,
+    client: Optional[Any] = None,
+    compose_meta: Optional[dict] = None,
 ) -> SmokeResult:
     """Capability-aware DERIVED smoke prober (CONTRACT-4).
 
@@ -149,13 +181,28 @@ def smoke_derived(
     with un-smoked capabilities is `partial` and cannot graduate to Tier-1
     for those capabilities.
 
+    The OpenAI `model` field sent to the server is the RESOLVED
+    served-model-name (see `_resolve_served_model_name`) — NOT the literal
+    `"derived"` (which vLLM 404s; the on-rig E5 red-smoke-on-healthy-boot
+    defect). `compose_meta` (optional; the dict
+    `generate_from_profile` returns, carrying `served_model_name`) is used
+    when available, else `sanitize_slug(einput.slug)` (identical to the
+    emitted `--served-model-name`).
+
     `client` is INJECTABLE: default = the real OpenAI-compatible probe
     against `endpoint`; E3 tests pass a fixture client so there is NO live
     server in CI. A client must provide:
-      .probe(capability, endpoint) -> bool   (True == green)
+      .probe(capability, endpoint, model_name) -> bool
+          | (bool, status:int|None, error:str)
+      (truthy / a True first element == green; the optional 2nd/3rd
+      carry the HTTP status + a short error snippet for the additive
+      `results_detail` failure capture). A legacy bare-bool client is
+      still accepted (no detail recorded for it).
     """
     if client is None:
         client = _HttpSmokeClient()
+
+    model_name = _resolve_served_model_name(einput, compose_meta)
 
     der = einput.der
     probe_set: list[str] = list(FLOOR_CAPS)
@@ -164,23 +211,55 @@ def smoke_derived(
             probe_set.append(cap)
 
     results: dict[str, str] = {}
+    results_detail: dict[str, dict] = {}
     # FLOOR + declared caps -> actually probed; everything in OPTIONAL_CAPS
     # not declared -> "unsmoked" (recorded, drives `partial`).
     for cap in FLOOR_CAPS + OPTIONAL_CAPS:
-        if cap in probe_set:
-            try:
-                ok = bool(client.probe(cap, endpoint))
-            except Exception:
-                ok = False
-            results[cap] = "green" if ok else "red"
-        else:
+        if cap not in probe_set:
             results[cap] = "unsmoked"
+            continue
+        status: Optional[int] = None
+        error: str = ""
+        try:
+            raw = client.probe(cap, endpoint, model_name)
+        except TypeError:
+            # Legacy fixture/client with the old 2-arg signature — keep the
+            # injected-fixture seam working (E3 tests inject a fake client).
+            try:
+                raw = client.probe(cap, endpoint)
+            except Exception as exc:
+                raw, status, error = False, None, repr(exc)
+        except Exception as exc:
+            raw, status, error = False, None, repr(exc)
+
+        if isinstance(raw, tuple):
+            ok = bool(raw[0])
+            if len(raw) > 1 and raw[1] is not None:
+                status = int(raw[1])
+            if len(raw) > 2 and raw[2]:
+                error = str(raw[2])
+        else:
+            ok = bool(raw)
+
+        if ok:
+            results[cap] = "green"
+        else:
+            results[cap] = "red"
+            # ADDITIVE: a `red` carries the HTTP status + a short, redacted
+            # error snippet so [F]'s §6.1 classifier + on-rig E5 diagnosis
+            # have something to reason over (today pt4 records only the
+            # bare verdict).
+            results_detail[cap] = {
+                "status": status,
+                "error": _redact_text(error)[:240] if error else "",
+            }
 
     partial = any(v == "unsmoked" for v in results.values())
     return SmokeResult(
         smoke_capability_set=sorted(probe_set),
         results=results,
         partial=partial,
+        results_detail=results_detail,
     )
 
 
@@ -189,18 +268,29 @@ class _HttpSmokeClient:
     injected; the live server is E5 on-rig). Codifies the minimal
     OpenAI-compatible probe per capability so E5 has nothing to invent."""
 
-    def probe(self, capability: str, endpoint: str) -> bool:  # pragma: no cover - E5
-        import urllib.error
-        import urllib.request
-
-        url = f"{endpoint}/chat/completions"
-        body = {
-            "model": "derived",
+    def _build_body(self, capability: str, model_name: str) -> dict:
+        """Construct the OpenAI /chat/completions probe body. The `model`
+        field MUST be the resolved served-model-name (NOT the literal
+        `"derived"` — vLLM validates it against `--served-model-name` and
+        404s an unknown name; that was the on-rig E5 defect). Factored out
+        so a UNIT test can assert the request shape with NO network."""
+        body: dict = {
+            "model": model_name,
             "messages": [{"role": "user", "content": "ping"}],
             "max_tokens": 8,
         }
         if capability == "streaming":
             body["stream"] = True
+        return body
+
+    def probe(  # pragma: no cover - E5
+        self, capability: str, endpoint: str, model_name: str
+    ) -> tuple[bool, Optional[int], str]:
+        import urllib.error
+        import urllib.request
+
+        url = f"{endpoint}/chat/completions"
+        body = self._build_body(capability, model_name)
         try:
             req = urllib.request.Request(
                 url,
@@ -209,9 +299,17 @@ class _HttpSmokeClient:
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=30) as resp:
-                return resp.status == 200
-        except (urllib.error.URLError, OSError):
-            return False
+                ok = resp.status == 200
+                return (ok, resp.status, "" if ok else f"HTTP {resp.status}")
+        except urllib.error.HTTPError as exc:
+            snippet = ""
+            try:
+                snippet = exc.read().decode("utf-8", "replace")[:240]
+            except Exception:
+                snippet = str(exc)
+            return (False, exc.code, f"HTTP {exc.code}: {snippet}")
+        except (urllib.error.URLError, OSError) as exc:
+            return (False, None, repr(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -371,11 +469,23 @@ def emit_capture(
     }
 
     # ---- pt4: post-boot capability-aware smoke ------------------------
+    # `point` / `smoke_capability_set` / `results` / `partial` are the
+    # LOCKED CONTRACT-4 shape (byte-behaviour-unchanged — [F] §6.1 recon
+    # depends on them). `results_detail` is ADDITIVE only: per-`red`-cap
+    # HTTP-status + redacted error snippet so [F]'s classifier + on-rig E5
+    # diagnosis are not blind to WHY a probe went red (the on-rig defect:
+    # only `red` was recorded, no 404 status).
     pt4 = {
         "point": "smoke",
         "smoke_capability_set": list(smoke_result.smoke_capability_set),
         "results": dict(smoke_result.results),
         "partial": bool(smoke_result.partial),
+        "results_detail": {
+            k: dict(v)
+            for k, v in (
+                getattr(smoke_result, "results_detail", {}) or {}
+            ).items()
+        },
     }
 
     # ---- manifest: §6.2 consensus-key inputs as FIRST-CLASS fields -----

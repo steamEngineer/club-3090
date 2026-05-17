@@ -167,12 +167,17 @@ check("down" in [c[0] for c in r3.calls],
 # 3. Smoke floor: plain-chat + streaming ALWAYS; no-tools -> unsmoked/partial.
 # ---------------------------------------------------------------------------
 class FixtureClient:
+    # Lock-step with the E3-fix probe signature: smoke_derived now passes
+    # the resolved served-model-name as a 3rd arg (NOT the literal
+    # "derived"). The fixture records it so the test can assert it.
     def __init__(self, green=True):
         self.green = green
         self.probed: list[str] = []
+        self.models: list[str] = []
 
-    def probe(self, capability, endpoint):
+    def probe(self, capability, endpoint, model_name):
         self.probed.append(capability)
+        self.models.append(model_name)
         return self.green
 
 
@@ -218,6 +223,86 @@ fc3 = FixtureClient(green=False)
 sm3 = C.smoke_derived(ei, "http://x/v1", client=fc3)
 check(sm3.results["plain-chat"] == "red" and sm3.results["streaming"] == "red",
       "smoke red: a failing floor probe records 'red' (caught #145 class)")
+
+# ---------------------------------------------------------------------------
+# 3b. E3-fix: the probe MUST send the real served-model-name (NOT the literal
+#     "derived") + a non-200 produces red WITH the additive status/error
+#     detail. This is the on-rig E5 defect: healthy boot, model:"derived" is
+#     an unknown served name -> vLLM 404 -> every floor probe red.
+# ---------------------------------------------------------------------------
+from scripts.lib.profiles.downloader import sanitize_slug as _san  # noqa: E402
+
+# (i) smoke_derived passes the resolved served-model-name to the client.
+fc_name = FixtureClient(green=True)
+C.smoke_derived(ei, "http://127.0.0.1:8071/v1", client=fc_name)
+expected_name = _san(ei.slug)  # == generate_from_profile --served-model-name
+check(expected_name == "org-my-model",
+      f"E3-fix: sanitize_slug(slug) == emitted served-model-name "
+      f"(got {expected_name!r})")
+check(set(fc_name.models) == {expected_name},
+      f"E3-fix: probe receives the REAL served-model-name, not 'derived' "
+      f"(got {sorted(set(fc_name.models))})")
+check("derived" not in fc_name.models,
+      "E3-fix: the literal 'derived' is NEVER sent as the model field")
+
+# (ii) compose_meta.served_model_name (priority a) overrides the slug fallback.
+fc_meta = FixtureClient(green=True)
+C.smoke_derived(ei, "http://x/v1", client=fc_meta,
+                compose_meta={"served_model_name": "qwen-qwen2.5-0.5b-instruct"})
+check(set(fc_meta.models) == {"qwen-qwen2.5-0.5b-instruct"},
+      f"E3-fix: compose_meta.served_model_name is authoritative (priority a) "
+      f"(got {sorted(set(fc_meta.models))})")
+
+# (iii) the REAL _HttpSmokeClient builds the body with the real model name
+#       (request-building unit; NO network — _build_body is factored out).
+real = C._HttpSmokeClient()
+b_plain = real._build_body("plain-chat", expected_name)
+check(b_plain["model"] == expected_name and b_plain["model"] != "derived",
+      f"E3-fix: real client body model=='{expected_name}' not 'derived' "
+      f"(got {b_plain['model']!r})")
+check(b_plain.get("stream") is None,
+      "E3-fix: plain-chat body has no stream flag")
+b_str = real._build_body("streaming", expected_name)
+check(b_str["model"] == expected_name and b_str.get("stream") is True,
+      "E3-fix: streaming body keeps stream:true + real model name")
+
+# (iv) a simulated non-200 -> red WITH the additive status/error detail.
+class Fixture404Client:
+    def probe(self, capability, endpoint, model_name):
+        # mirrors _HttpSmokeClient's (ok, status, error) contract on a 404.
+        return (False, 404,
+                f'HTTP 404: {{"object":"error","message":'
+                f'"The model `{model_name}` does not exist."}}')
+
+sm404 = C.smoke_derived(ei, "http://x/v1", client=Fixture404Client())
+check(sm404.results["plain-chat"] == "red"
+      and sm404.results["streaming"] == "red",
+      "E3-fix: non-200 floor probe -> red (the on-rig red-smoke symptom)")
+check(sm404.results_detail.get("plain-chat", {}).get("status") == 404
+      and "does not exist" in
+          sm404.results_detail.get("plain-chat", {}).get("error", ""),
+      f"E3-fix: red carries additive {{status:404, error:...}} detail "
+      f"(got {sm404.results_detail.get('plain-chat')!r})")
+check("streaming" in sm404.results_detail
+      and sm404.results_detail["streaming"]["status"] == 404,
+      "E3-fix: every failing capability gets a results_detail entry")
+# green caps carry NO detail (additive only on red).
+sm_green = C.smoke_derived(ei, "http://x/v1", client=FixtureClient(green=True))
+check(sm_green.results_detail == {},
+      "E3-fix: results_detail empty when nothing is red (additive-on-red)")
+
+# (v) legacy 2-arg fixture client still works (injected-seam compatibility).
+class LegacyClient:
+    def __init__(self):
+        self.calls = 0
+    def probe(self, capability, endpoint):  # OLD signature
+        self.calls += 1
+        return True
+
+lc = LegacyClient()
+sm_legacy = C.smoke_derived(ei, "http://x/v1", client=lc)
+check(lc.calls >= 2 and sm_legacy.results["plain-chat"] == "green",
+      "E3-fix: legacy 2-arg client still accepted (seam not weakened)")
 
 # ---------------------------------------------------------------------------
 # 4. The 4 artifacts + manifest: EXACT CONTRACT-4 schema/keys, redacted.
@@ -270,12 +355,22 @@ with tempfile.TemporaryDirectory() as td:
           f"pt3 boot EXACT CONTRACT-4 (got {sorted(pt3)})")
 
     pt4 = json.loads(Path(p["smoke"]).read_text())
-    check(set(pt4) == {"point", "smoke_capability_set", "results", "partial"}
+    # LOCKED CONTRACT-4 keys unchanged; `results_detail` is the ONLY
+    # additive field (E3-fix). Assert the locked shape/values explicitly +
+    # that the additive key is present (tightened, never weakened).
+    check(set(pt4) == {"point", "smoke_capability_set", "results",
+                       "partial", "results_detail"}
           and pt4["point"] == "smoke"
           and pt4["smoke_capability_set"] == ["plain-chat", "streaming"]
           and pt4["partial"] is True
           and pt4["results"]["tool-call"] == "unsmoked",
-          f"pt4 smoke EXACT CONTRACT-4 (got {sorted(pt4)})")
+          f"pt4 smoke CONTRACT-4 locked keys + additive results_detail "
+          f"(got {sorted(pt4)})")
+    check(pt4["results"]["plain-chat"] == "green"
+          and pt4["results"]["streaming"] == "green",
+          "pt4 smoke: locked `results` byte-behaviour-unchanged (green floor)")
+    check(isinstance(pt4["results_detail"], dict),
+          "pt4 smoke: results_detail is an (additive) dict")
 
     # CAPTURE-POINT 5 NOT emitted (out of E3 scope).
     cap_dir = Path(out["dir"])
