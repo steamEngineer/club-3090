@@ -16,6 +16,26 @@ history; SemVer takes over from `v0.3.0` onward.
 
 ---
 
+## v0.8.1 — 2026-05-17
+
+
+### 🐛 Bug fixes
+
+- fix(patch-attribution): register vendored gemma-4-31b pr41800 overlay (follow-up to #153/#154) ([b4b20ff](https://github.com/noonghunna/club-3090/commit/b4b20ff7b64394a4dbf9a4303c8bec9da95fc54f))
+- fix(gemma-4-31b): vendor missing vllm-pr41800 overlay into the model tree (closes #153) ([9c79192](https://github.com/noonghunna/club-3090/commit/9c7919253d01615b9e1d54b31eacc08540bbb6fd))
+- fix(pull): argparse usage errors exit 64, not 2 — distinguishable from honest hard-stop (#370) ([820eb38](https://github.com/noonghunna/club-3090/commit/820eb3845c2ed442e88be7312efc524e277094e5))
+
+
+### 📝 Documentation
+
+- docs(examples): correct "thinking on by default" — shipped composes set enable_thinking=false (#372) ([46bb271](https://github.com/noonghunna/club-3090/commit/46bb271737db263ad225b1fb10c3dd36b5aa389f))
+- docs(hardware): newer-driver 3090 caps long-text.yml at MAX_MODEL_LEN=105000 (#149) ([b0774f9](https://github.com/noonghunna/club-3090/commit/b0774f953b24da40c9a4f8b8a79aa1c0f0fc735f))
+- docs: fix v0.8.0 docs-fidelity gaps (trc-ack first-run heads-up, exit-code honesty, GGUF message claim) ([78a7dee](https://github.com/noonghunna/club-3090/commit/78a7dee2478e1d86805bf90371f6e586eb482e7e))
+- docs: cross-link the v0.8.0 universal pull flow from the existing user guides ([afe56f7](https://github.com/noonghunna/club-3090/commit/afe56f763fccec340b693ed765879eaffcbcfd6f))
+
+
+
+[Pin: `git checkout v0.8.1`] · [Full diff](https://github.com/noonghunna/club-3090/compare/v0.8.0...v0.8.1)
 ## v0.8.0 — 2026-05-17
 
 
