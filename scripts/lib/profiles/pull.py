@@ -454,7 +454,11 @@ def run_pull(
     # shipped E1/E2/E3 functions.
     emit_fn: Optional[Callable] = None,         # E1 generate_from_profile
     download_fn: Optional[Callable] = None,     # E2 download_model
-    boot_fn: Optional[Callable] = None,         # E3 boot_derived
+    # E3 boot lifecycle CM factory (the E3/E4-fix seam): a context-manager
+    # factory `boot_cm(ei, compose_text, runner=...) -> ctx[BootResult]`
+    # that keeps the server ALIVE for the `with` body (boot -> smoke ->
+    # capture) and tears it down on __exit__. Default = booted_derived.
+    boot_cm: Optional[Callable] = None,         # E3 booted_derived (CM)
     smoke_fn: Optional[Callable] = None,        # E3 smoke_derived
     capture_fn: Optional[Callable] = None,      # E3 emit_capture
     override_capture_fn: Optional[Callable] = None,  # E4 emit_override_capture
@@ -689,7 +693,7 @@ def run_pull(
                 terminal=c1.terminal.value, is_override_accepted=True,
                 hf_home=hf_home, hardware_sm=float(hardware_sm),
                 gpu_topology=gpu_topology, root=root, fetcher=fetcher,
-                emit_fn=emit_fn, download_fn=download_fn, boot_fn=boot_fn,
+                emit_fn=emit_fn, download_fn=download_fn, boot_cm=boot_cm,
                 smoke_fn=smoke_fn, capture_fn=capture_fn,
                 override_capture_fn=override_capture_fn,
             )
@@ -734,7 +738,7 @@ def run_pull(
                 terminal=c1.terminal.value, is_override_accepted=False,
                 hf_home=hf_home, hardware_sm=float(hardware_sm),
                 gpu_topology=gpu_topology, root=root, fetcher=fetcher,
-                emit_fn=emit_fn, download_fn=download_fn, boot_fn=boot_fn,
+                emit_fn=emit_fn, download_fn=download_fn, boot_cm=boot_cm,
                 smoke_fn=smoke_fn, capture_fn=capture_fn,
                 override_capture_fn=override_capture_fn,
             )
@@ -813,9 +817,15 @@ def run_pull(
 #   2. derived_emittable(einput)  — CONTRACT-5 pre-[E] precondition; on
 #      refuse -> structured `derived-runtime-unsupported:<reason>` notice +
 #      diagnostics, NO download / NO boot.
-#   3. generate_from_profile -> download_model -> boot_derived ->
-#      smoke_derived -> emit_capture (pt1-4 + manifest)
-#   4. if is_override_accepted: emit_override_capture (§5.3 pt5)
+#   3. generate_from_profile -> download_model -> `with booted_derived(...)
+#      as bt:`  [server UP] -> smoke_derived -> emit_capture (pt1-4 +
+#      manifest) [-> pt5 if override]  -> CM __exit__: teardown (ALWAYS,
+#      AFTER capture). The E3/E4-fix: smoke + capture run against a LIVE
+#      server inside the `with`; teardown is on context-manager exit, not
+#      before the boot call returns (on-rig E5 caught the prior teardown-
+#      in-finally-before-smoke -> ConnectionRefused defect).
+#   4. if is_override_accepted: emit_override_capture (§5.3 pt5) — also
+#      inside the `with` (before teardown).
 #
 # Every stage func is INJECTABLE (test-pull.sh mocks them; real on-rig is
 # E5). All stage exceptions are caught + recorded structurally — the [E]
@@ -901,7 +911,7 @@ def _build_einput(
 def _run_derived_e_stage(
     res, *, slug, profile_like, der, s2, c2a, conf, raw, terminal,
     is_override_accepted, hf_home, hardware_sm, gpu_topology, root, fetcher,
-    emit_fn, download_fn, boot_fn, smoke_fn, capture_fn,
+    emit_fn, download_fn, boot_cm, smoke_fn, capture_fn,
     override_capture_fn,
 ):
     """Run the post-`[C1]` derived `[E]` stage. Mutates ONLY the additive
@@ -922,7 +932,11 @@ def _run_derived_e_stage(
 
     emit_fn = emit_fn or gc.generate_from_profile
     download_fn = download_fn or _DL.download_model
-    boot_fn = boot_fn or _B.boot_derived
+    # E3/E4-fix: the boot lifecycle is a CONTEXT MANAGER factory — the
+    # server stays ALIVE for the `with` body (smoke + capture run against a
+    # live server); teardown is on __exit__, AFTER capture. Default =
+    # booted_derived. Injectable so test-pull.sh stays mock-only.
+    boot_cm = boot_cm or _B.booted_derived
     smoke_fn = smoke_fn or _CAP.smoke_derived
     capture_fn = capture_fn or _CAP.emit_capture
     override_capture_fn = override_capture_fn or _CAP.emit_override_capture
@@ -1001,86 +1015,111 @@ def _run_derived_e_stage(
             f"{getattr(dl, 'failure', None)!r}"
         )
 
-    # ----- E3: boot_derived -----------------------------------------------
+    # ----- E3/E4-fix: boot -> smoke -> capture, ALL inside the live-server
+    #       context manager. The server is ALIVE for the entire `with` body
+    #       (booted_derived yields the handle while UP); teardown (down +
+    #       rmtree) happens on `__exit__`, AFTER capture+pt5, ALWAYS (the
+    #       CM's own finally — no-orphan guarantee preserved at the CORRECT
+    #       scope). On-rig E5 caught the prior teardown-in-finally-before-
+    #       smoke defect: smoke ran against an already-destroyed server ->
+    #       ConnectionRefused, every time. Now smoke runs while UP.
+    #
+    #       The whole `with` is wrapped so a smoke/capture exception is
+    #       caught structurally here (never raises out of run_pull — every
+    #       pre-existing test-pull.sh assertion byte-unaffected); the CM's
+    #       teardown STILL runs on the exceptional __exit__ before this
+    #       except is reached. ------------------------------------------
     try:
-        bt = boot_fn(ei, compose_text)
+        with boot_cm(ei, compose_text) as bt:
+            res.boot_ok = bool(getattr(bt, "ok", False))
+
+            # --- E3: smoke_derived (server is UP here) -------------------
+            sm = _CAP.SmokeResult()
+            endpoint = getattr(bt, "endpoint", None)
+            if res.boot_ok and endpoint:
+                try:
+                    sm = smoke_fn(ei, endpoint)
+                except Exception as exc:  # pragma: no cover - smoke defensive
+                    res.notices.append(f"[E] smoke failed: {exc!r}")
+            res.smoke = {
+                "smoke_capability_set": list(
+                    getattr(sm, "smoke_capability_set", []) or []
+                ),
+                "results": dict(getattr(sm, "results", {}) or {}),
+                "partial": bool(getattr(sm, "partial", False)),
+            }
+
+            # --- E3: emit_capture (pt1-4 + manifest) — emitted while/just
+            #     after smoke, BEFORE teardown (which is the CM __exit__) --
+            try:
+                cap = capture_fn(
+                    ei,
+                    confidence=SimpleNamespace(name=str(conf)),
+                    raw_verdict=raw,
+                    profile_like=profile_like,
+                    download_result=dl,
+                    boot_result=bt,
+                    smoke_result=sm,
+                    compose_meta=compose_meta,
+                    kv_calc_version=_KV_CALC_VERSION,
+                    repo_root=root,
+                    ts=ts,
+                )
+                res.capture_paths = list((cap.get("paths") or {}).values())
+                res.diagnostics["capture_dir"] = cap.get("dir")
+            except Exception as exc:
+                res.notices.append(f"[E] capture emit failed: {exc!r}")
+                stage["capture_ok"] = False
+                res.diagnostics["e_stage"] = stage
+                # Leave the `with` -> CM teardown still runs on __exit__.
+                return
+            stage["capture_ok"] = True
+
+            # --- CONTRACT-4 pt5: override-accepted force-capture (§5.3) --
+            # Emitted ONLY when is_override_accepted (the §5.3 trigger).
+            # The literal calibration_signal_not_validated:true is enforced
+            # inside the emitter. Still inside the `with` (before teardown).
+            if is_override_accepted:
+                boot_peak = None
+                gpu_worker = None
+                exit_summary = None
+                if not res.boot_ok:
+                    # boot never reached allocation -> actual null; the WHY
+                    # is the boot failure reason (CONTRACT-4 pt5).
+                    exit_summary = getattr(bt, "failure", None) or (
+                        "boot did not reach allocation"
+                    )
+                try:
+                    p5 = override_capture_fn(
+                        ei,
+                        predicted_b_breakdown=res.diagnostics.get(
+                            "b_breakdown"
+                        ),
+                        boot_peak_mib=boot_peak,
+                        gpu_worker_reported_mib=gpu_worker,
+                        exit_error_summary=exit_summary,
+                        repo_root=root,
+                        ts=ts,
+                    )
+                    res.capture_paths.append(p5)
+                    res.notices.append(
+                        "[E] §5.3 override-accepted force-capture (pt5) "
+                        "emitted (calibration signal, NOT fit-validated)"
+                    )
+                except Exception as exc:  # pragma: no cover - emitter
+                    res.notices.append(
+                        f"[E] pt5 override-capture failed: {exc!r}"
+                    )
+        # <- CM __exit__ HERE: runner.down + rmtree ALWAYS ran (success OR
+        #    exception in the with-body), AFTER smoke + capture + pt5.
     except Exception as exc:
+        # Boot CM raised (defensive — booted_derived yields an ok=False
+        # handle for an EXPECTED boot failure, so this is the unexpected
+        # path). The CM's finally already tore down. Record structurally;
+        # NEVER raise out of run_pull.
         res.notices.append(f"[E] boot failed: {exc!r}")
-        res.boot_ok = False
-        bt = _B.BootResult(ok=False, failure=f"boot raised: {exc!r}")
-    else:
-        res.boot_ok = bool(getattr(bt, "ok", False))
-
-    # ----- E3: smoke_derived (only when the boot produced an endpoint) ----
-    sm = _CAP.SmokeResult()
-    endpoint = getattr(bt, "endpoint", None)
-    if res.boot_ok and endpoint:
-        try:
-            sm = smoke_fn(ei, endpoint)
-        except Exception as exc:  # pragma: no cover - smoke defensive
-            res.notices.append(f"[E] smoke failed: {exc!r}")
-    res.smoke = {
-        "smoke_capability_set": list(
-            getattr(sm, "smoke_capability_set", []) or []
-        ),
-        "results": dict(getattr(sm, "results", {}) or {}),
-        "partial": bool(getattr(sm, "partial", False)),
-    }
-
-    # ----- E3: emit_capture (pt1-4 + manifest) ----------------------------
-    try:
-        cap = capture_fn(
-            ei,
-            confidence=SimpleNamespace(name=str(conf)),
-            raw_verdict=raw,
-            profile_like=profile_like,
-            download_result=dl,
-            boot_result=bt,
-            smoke_result=sm,
-            compose_meta=compose_meta,
-            kv_calc_version=_KV_CALC_VERSION,
-            repo_root=root,
-            ts=ts,
-        )
-        res.capture_paths = list((cap.get("paths") or {}).values())
-        res.diagnostics["capture_dir"] = cap.get("dir")
-    except Exception as exc:
-        res.notices.append(f"[E] capture emit failed: {exc!r}")
-        stage["capture_ok"] = False
-        res.diagnostics["e_stage"] = stage
-        return
-    stage["capture_ok"] = True
-
-    # ----- CONTRACT-4 pt5: override-accepted force-capture (§5.3) ----------
-    # Emitted ONLY when is_override_accepted (the §5.3 trigger). The literal
-    # calibration_signal_not_validated:true is enforced inside the emitter.
-    if is_override_accepted:
-        boot_peak = None
-        gpu_worker = None
-        exit_summary = None
-        if not res.boot_ok:
-            # boot never reached allocation -> actual null; the WHY is the
-            # boot failure reason (CONTRACT-4 pt5).
-            exit_summary = getattr(bt, "failure", None) or (
-                "boot did not reach allocation"
-            )
-        try:
-            p5 = override_capture_fn(
-                ei,
-                predicted_b_breakdown=res.diagnostics.get("b_breakdown"),
-                boot_peak_mib=boot_peak,
-                gpu_worker_reported_mib=gpu_worker,
-                exit_error_summary=exit_summary,
-                repo_root=root,
-                ts=ts,
-            )
-            res.capture_paths.append(p5)
-            res.notices.append(
-                "[E] §5.3 override-accepted force-capture (pt5) emitted "
-                "(calibration signal, NOT fit-validated)"
-            )
-        except Exception as exc:  # pragma: no cover - emitter defensive
-            res.notices.append(f"[E] pt5 override-capture failed: {exc!r}")
+        if res.boot_ok is None:
+            res.boot_ok = False
 
     res.diagnostics["e_stage"] = stage
 

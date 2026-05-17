@@ -992,6 +992,15 @@ class _Calls:
     def __init__(self):
         self.emit = self.dl = self.boot = self.smoke = 0
         self.cap = self.p5 = 0
+        # E3/E4-fix ordering ledger: every lifecycle event appended in
+        # invocation order so a test can PROVE the new contract —
+        #   boot-up -> (server ALIVE) smoke -> capture [-> pt5] -> teardown
+        # i.e. teardown index > capture index > smoke index > boot index,
+        # and smoke/capture see `server_alive == True`.
+        self.order: list[str] = []
+        self.server_alive = False
+        self.smoke_saw_alive = None
+        self.capture_saw_alive = None
 
 
 def mk_emocks(calls, *, emittable=True, boot_ok=True):
@@ -1015,16 +1024,39 @@ def mk_emocks(calls, *, emittable=True, boot_ok=True):
                               failure=None,
                               local_dir=str(ei.hf_home))
 
-    def boot_fn(ei, compose_text):
+    import contextlib as _cl
+
+    @_cl.contextmanager
+    def boot_cm(ei, compose_text):
+        # E3/E4-fix: the boot lifecycle is a CONTEXT MANAGER. up() FIRST,
+        # then `yield` the live handle WHILE the (fixture) server is "up";
+        # teardown (down) ALWAYS in the finally, on __exit__, AFTER the
+        # with-body (smoke + capture + pt5). This fixture records the exact
+        # event order so the test can prove up -> smoke -> capture -> down
+        # and that teardown still runs if the with-body raises.
         calls.boot += 1
-        if boot_ok:
-            return BootResult(ok=True, seconds=1.0, failure=None,
-                              endpoint="http://127.0.0.1:8020/v1")
-        return BootResult(ok=False, seconds=0.5,
-                          failure="CUDA OOM; worker exited", endpoint=None)
+        calls.order.append("up")
+        calls.server_alive = True
+        try:
+            if boot_ok:
+                yield BootResult(ok=True, seconds=1.0, failure=None,
+                                 endpoint="http://127.0.0.1:8020/v1")
+            else:
+                yield BootResult(ok=False, seconds=0.5,
+                                 failure="CUDA OOM; worker exited",
+                                 endpoint=None)
+        finally:
+            # ALWAYS — even if the with-body raised (no-orphan guarantee at
+            # the CORRECT scope: AFTER smoke + capture, never before).
+            calls.server_alive = False
+            calls.order.append("down")
 
     def smoke_fn(ei, endpoint):
         calls.smoke += 1
+        calls.order.append("smoke")
+        # PROOF the server is ALIVE when smoke runs (the whole point of the
+        # E3/E4-fix — the prior teardown-in-finally-before-return killed it).
+        calls.smoke_saw_alive = calls.server_alive
         return _CAP.SmokeResult(
             smoke_capability_set=["plain-chat", "streaming"],
             results={"plain-chat": "green", "streaming": "green",
@@ -1035,13 +1067,18 @@ def mk_emocks(calls, *, emittable=True, boot_ok=True):
 
     def capture_fn(ei, **kw):
         calls.cap += 1
+        calls.order.append("capture")
+        # Capture is also emitted while the server is still UP (before the
+        # CM __exit__ teardown).
+        calls.capture_saw_alive = calls.server_alive
         return _CAP.emit_capture(ei, **kw)
 
     def override_capture_fn(ei, **kw):
         calls.p5 += 1
+        calls.order.append("pt5")
         return _CAP.emit_override_capture(ei, **kw)
 
-    return dict(emit_fn=emit_fn, download_fn=download_fn, boot_fn=boot_fn,
+    return dict(emit_fn=emit_fn, download_fn=download_fn, boot_cm=boot_cm,
                 smoke_fn=smoke_fn, capture_fn=capture_fn,
                 override_capture_fn=override_capture_fn)
 
@@ -1095,11 +1132,67 @@ check(any("pt1-gate" in x for x in _g16caps)
       f"g16: pt1-4 + manifest emitted, NO pt5 (non-override) "
       f"(paths={[os.path.basename(x) for x in _g16caps]})")
 check(c.p5 == 0, "g16: override-capture (pt5) NOT invoked (not override)")
+
+# --- g16b: E3/E4-fix — boot lifecycle is a context manager; the server
+#     stays UP for smoke+capture; teardown happens on CM __exit__ AFTER
+#     the with-body. This is the assertion that PROVES the on-rig E5
+#     teardown-in-finally-before-smoke defect is fixed: prior code tore the
+#     container down BEFORE smoke -> ConnectionRefused, by construction. ---
+_oi = {ev: i for i, ev in enumerate(c.order)}
+check(c.order == ["up", "smoke", "capture", "down"],
+      f"g16b: lifecycle order is up -> smoke -> capture -> down EXACTLY "
+      f"(got {c.order})")
+check(_oi["up"] < _oi["smoke"] < _oi["capture"] < _oi["down"],
+      f"g16b: teardown idx > capture idx > smoke idx > boot/up idx "
+      f"(order={c.order})")
+check(c.smoke_saw_alive is True,
+      "g16b: smoke ran while the server was ALIVE (NOT torn down first — "
+      "the on-rig E5 ConnectionRefused root-cause is fixed)")
+check(c.capture_saw_alive is True,
+      "g16b: capture (pt1-4 + manifest) emitted while the server was still "
+      "UP, BEFORE the CM __exit__ teardown")
+check(c.server_alive is False,
+      "g16b: after run_pull returned the CM __exit__ ran -> server torn "
+      "down (no-orphan guarantee preserved at the CORRECT scope)")
 for _x in r.capture_paths:
     try:
         os.unlink(_x)
     except OSError:
         pass
+
+# --- g16c: E3/E4-fix — teardown STILL runs (no-orphan) even if capture
+#     RAISES inside the `with` body. The CM's finally must fire on the
+#     exceptional __exit__; run_pull must NOT raise (PullResult intact). --
+c = _Calls()
+
+
+def _boom_capture(ei, **kw):
+    c.cap += 1
+    c.order.append("capture")
+    c.capture_saw_alive = c.server_alive
+    raise RuntimeError("capture blew up mid-with-body")
+
+
+_em = mk_emocks(c, emittable=True, boot_ok=True)
+_em["capture_fn"] = _boom_capture
+r = P.run_pull(
+    DSLUG, "vllm/minimal", path="B", hardware_sm=SM_86,
+    fetcher=ff_derived(DSLUG, dense_cfg("Qwen2ForCausalLM"), weight_gb=4.0),
+    profiles=profiles, statvfs=BIG_DISK, trust_remote_code=True,
+    yes=True, gpu_topology=TOPO_2, **_em)
+check(isinstance(r, P.PullResult) and r.ok,
+      f"g16c: capture raising inside the `with` does NOT raise out of "
+      f"run_pull; PullResult intact (ok={r.ok})")
+check("down" in c.order and c.order.index("down") > c.order.index("capture")
+      and c.server_alive is False,
+      f"g16c: CM teardown STILL ran on the exceptional __exit__, AFTER the "
+      f"capture that raised (no-orphan preserved) (order={c.order})")
+check(c.capture_saw_alive is True,
+      "g16c: the raising capture still saw the server ALIVE (smoke+capture "
+      "scope is correct even on the failure path)")
+check(any("capture emit failed" in n for n in r.notices),
+      "g16c: the capture exception is recorded structurally as a notice")
+_purge_captures()
 
 # --- g17: non-curated + --dry-run -> verdict-only, NO [E] ----------------
 c = _Calls()
@@ -1234,9 +1327,12 @@ if failures:
 print("\nSUMMARY: all Pull-Gate P4 truth-table assertions passed "
       "(§4.1 9 cells + 6 strata + ordering + g0..g15 + trc-leak + "
       "Path-B isolation) + v0.8.0 [E] E4 orchestration (g16..g22: "
-      "derived-[E] continuation, --dry-run verdict-only, --force-download "
-      "override + pt5 force-capture, confirm-without-yes/override-without-"
-      "force gating, curated-Path-A unchanged, CONTRACT-5 reject).")
+      "derived-[E] continuation, E3/E4-fix boot-lifecycle CM ordering "
+      "[g16b up->smoke->capture->down, smoke+capture see server ALIVE] + "
+      "[g16c teardown-on-exception], --dry-run verdict-only, "
+      "--force-download override + pt5 force-capture, confirm-without-yes/"
+      "override-without-force gating, curated-Path-A unchanged, "
+      "CONTRACT-5 reject).")
 PY
 
 echo "test-pull.sh OK"

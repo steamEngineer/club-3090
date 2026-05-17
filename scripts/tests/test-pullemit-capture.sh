@@ -12,11 +12,15 @@ set -euo pipefail
 # grepped on disk for redaction.
 #
 # Coverage:
-#   * boot success (fixture runner)        -> BootResult.ok, endpoint set,
-#                                             teardown invoked.
-#   * boot container-died (fixture runner) -> BootResult.ok False, failure
-#                                             populated, teardown STILL
-#                                             invoked (always-teardown).
+#   * E3/E4-fix: booted_derived is a CONTEXT MANAGER — boot success yields
+#     a live BootResult.ok handle WHILE the server is UP (smoke runs inside
+#     the `with`, NOT after teardown); teardown (down) happens on __exit__
+#     AFTER the with-body. Proves up -> (smoke, server alive) -> down, and
+#     that teardown STILL runs if the with-body raises (on-rig E5 caught
+#     the prior teardown-in-finally-before-smoke -> ConnectionRefused).
+#   * boot container-died (fixture runner) -> ok=False handle STILL yielded
+#     (CM does NOT raise for an expected boot failure), teardown STILL
+#     invoked on __exit__ (always-teardown discipline at the CM scope).
 #   * boot uses the HF_HOME host->container :ro mount carried in
 #     compose_text (NOT MODEL_DIR); --project-directory discipline.
 #   * smoke floor: plain-chat + streaming ALWAYS probed; a config declaring
@@ -96,8 +100,11 @@ def mk_einput(slug, *, der, terminal="proceed"):
 
 
 # ---------------------------------------------------------------------------
-# Fixture runner: records up/wait_ready/down calls; can simulate a dead
-# container by raising BootError from up() or wait_ready().
+# Fixture runner: records up/wait_ready/down (and test-injected "smoke")
+# calls in invocation order; can simulate a dead container by raising
+# BootError from up() or wait_ready(). With booted_derived (a CM), down()
+# is only invoked on __exit__ — AFTER the `with` body — so the recorded
+# order proves up -> (smoke while UP) -> down.
 # ---------------------------------------------------------------------------
 class FixtureRunner:
     def __init__(self, *, die_on="", reason=""):
@@ -127,41 +134,91 @@ class FixtureRunner:
 
 
 # ---------------------------------------------------------------------------
-# 1. Boot success -> BootResult.ok, endpoint, teardown invoked.
+# 1. E3/E4-fix — booted_derived is a CONTEXT MANAGER. Boot success ->
+#    BootResult.ok handle yielded WHILE the server is UP; smoke runs INSIDE
+#    the `with` (server alive, NOT torn down); teardown (down) happens on
+#    __exit__, AFTER the with-body. This is the assertion that proves the
+#    on-rig E5 teardown-in-finally-before-smoke -> ConnectionRefused
+#    root-cause is fixed (prior boot_derived tore down before returning).
 # ---------------------------------------------------------------------------
 der_plain = SimpleNamespace(profile={"arch": "LlamaForCausalLM",
                                       "weight_format": "bfloat16"})
 ei = mk_einput("org/My-Model", der=der_plain)
 r = FixtureRunner()
-res = B.boot_derived(ei, COMPOSE_TEXT, runner=r)
-check(res.ok is True and res.failure is None,
-      f"boot success: BootResult.ok (got ok={res.ok} fail={res.failure})")
-check(res.endpoint == "http://127.0.0.1:8071/v1",
-      f"boot success: endpoint on host-published port (got {res.endpoint})")
-check(("up" in [c[0] for c in r.calls]
-       and "wait_ready" in [c[0] for c in r.calls]),
-      "boot success: up + wait_ready invoked")
-check(r.calls[-1][0] == "down",
-      "boot success: teardown (down) ALWAYS invoked last")
+with B.booted_derived(ei, COMPOSE_TEXT, runner=r) as res:
+    # INSIDE the with-body: server is UP. down() must NOT have run yet.
+    check(res.ok is True and res.failure is None,
+          f"boot success: BootResult.ok handle yielded "
+          f"(got ok={res.ok} fail={res.failure})")
+    check(res.endpoint == "http://127.0.0.1:8071/v1",
+          f"boot success: endpoint on host-published port "
+          f"(got {res.endpoint})")
+    _evs = [c[0] for c in r.calls]
+    check("up" in _evs and "wait_ready" in _evs,
+          "boot success: up + wait_ready invoked before the handle is "
+          "yielded")
+    check("down" not in _evs,
+          "E3/E4-fix: teardown (down) has NOT run yet INSIDE the `with` — "
+          "the server is ALIVE for smoke+capture (the on-rig E5 fix)")
+    # Simulate the orchestrator smoking the LIVE server inside the body.
+    r.calls.append(("smoke", res.endpoint, ""))
+# <- CM __exit__ HERE.
+_ev = [c[0] for c in r.calls]
+check(_ev[-1] == "down",
+      f"boot success: teardown (down) ALWAYS invoked LAST, on __exit__, "
+      f"AFTER the with-body smoke (calls={_ev})")
+check(_ev.index("down") > _ev.index("smoke") > _ev.index("up"),
+      f"boot success: order is up -> ... -> smoke -> down (teardown idx > "
+      f"smoke idx > up idx) (calls={_ev})")
+# Snapshot the (now torn-down) handle for the §4 capture test reuse — the
+# capture test only reads .ok/.seconds/.failure (a value object, valid
+# post-exit).
+res_snapshot = B.BootResult(ok=res.ok, seconds=res.seconds,
+                            failure=res.failure, endpoint=res.endpoint)
+res = res_snapshot
 
 # ---------------------------------------------------------------------------
-# 2. Boot container-died -> failure populated + teardown STILL invoked.
+# 2. Boot container-died -> ok=False handle STILL yielded (CM does NOT raise
+#    for an EXPECTED boot failure — orchestrator must still emit pt3 +
+#    capture) + teardown STILL invoked on __exit__.
 # ---------------------------------------------------------------------------
 r2 = FixtureRunner(die_on="wait_ready", reason="CUDA OOM; worker exited")
-res2 = B.boot_derived(ei, COMPOSE_TEXT, runner=r2)
-check(res2.ok is False and res2.failure == "CUDA OOM; worker exited",
-      f"boot died: ok False + failure populated (got ok={res2.ok} "
-      f"fail={res2.failure!r})")
-check(res2.endpoint is None, "boot died: endpoint None on failure")
-check("down" in [c[0] for c in r2.calls],
-      "boot died: teardown STILL invoked (always-teardown discipline)")
+with B.booted_derived(ei, COMPOSE_TEXT, runner=r2) as res2:
+    check(res2.ok is False and res2.failure == "CUDA OOM; worker exited",
+          f"boot died: ok=False handle YIELDED (not raised) + failure "
+          f"populated (got ok={res2.ok} fail={res2.failure!r})")
+    check(res2.endpoint is None, "boot died: endpoint None on failure")
+    check("down" not in [c[0] for c in r2.calls],
+          "boot died: teardown deferred to __exit__ (still inside `with`)")
+check("down" in [c[0] for c in r2.calls]
+      and [c[0] for c in r2.calls][-1] == "down",
+      "boot died: teardown STILL invoked on __exit__ (always-teardown "
+      "discipline preserved at the CM scope)")
 
 r3 = FixtureRunner(die_on="up", reason="image pull failed")
-res3 = B.boot_derived(ei, COMPOSE_TEXT, runner=r3)
-check(res3.ok is False and "image pull failed" in (res3.failure or ""),
-      f"boot up-fail: failure surfaced (got {res3.failure!r})")
+with B.booted_derived(ei, COMPOSE_TEXT, runner=r3) as res3:
+    check(res3.ok is False and "image pull failed" in (res3.failure or ""),
+          f"boot up-fail: ok=False handle yielded, failure surfaced "
+          f"(got {res3.failure!r})")
 check("down" in [c[0] for c in r3.calls],
-      "boot up-fail: teardown STILL invoked")
+      "boot up-fail: teardown STILL invoked on __exit__")
+
+# 2b. E3/E4-fix — teardown STILL runs if the `with` BODY raises (the CM's
+#     finally fires on the exceptional __exit__; no orphan ever).
+r4 = FixtureRunner()
+_raised = False
+try:
+    with B.booted_derived(ei, COMPOSE_TEXT, runner=r4) as res4:
+        check(res4.ok is True, "boot exc-body: server up before body raises")
+        check("down" not in [c[0] for c in r4.calls],
+              "boot exc-body: down not run yet (inside body)")
+        raise RuntimeError("orchestrator-body blew up mid-with")
+except RuntimeError:
+    _raised = True
+check(_raised, "boot exc-body: the with-body exception still propagates")
+check([c[0] for c in r4.calls][-1] == "down",
+      "boot exc-body: CM teardown STILL ran on the exceptional __exit__ "
+      "(no-orphan guarantee preserved even when the body raises)")
 
 # ---------------------------------------------------------------------------
 # 3. Smoke floor: plain-chat + streaming ALWAYS; no-tools -> unsmoked/partial.

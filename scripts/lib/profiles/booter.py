@@ -32,13 +32,35 @@ Public API (stable for E4)
 
     from scripts.lib.profiles import booter
 
-    res = booter.boot_derived(einput, compose_text, *, runner=None)
-    #   res: BootResult
-    #     .ok       -> bool
-    #     .seconds  -> float            (wall time of the up->ready probe)
-    #     .failure  -> None | "<container-died-reason>"
-    #     .endpoint -> str | None       (the OpenAI-compatible base URL when
-    #                                    ok; None on failure)
+    with booter.booted_derived(einput, compose_text, *, runner=None) as bt:
+        #   bt: BootResult — the server is ALIVE for the ENTIRE `with` body
+        #     .ok       -> bool
+        #     .seconds  -> float        (wall time of the up->ready probe)
+        #     .failure  -> None | "<container-died-reason>"
+        #     .endpoint -> str | None   (the OpenAI-compatible base URL when
+        #                                ok; None on failure)
+        if bt.ok:
+            smoke(bt.endpoint)          # server is UP here
+            capture(...)                # emitted BEFORE teardown
+    # <- teardown (runner.down + rmtree) happens HERE, on context-manager
+    #    exit, AFTER the with-body completes (success OR exception); ALWAYS.
+
+`booted_derived` is a `@contextlib.contextmanager`: it brings the server up,
+`yield`s a live `BootResult`-shaped handle while the server is UP (so the
+caller can smoke + capture AGAINST A LIVE SERVER), and ALWAYS tears the
+compose down in its `finally` on `__exit__` — preserving the no-orphan
+guarantee (the Pull-Gate on-rig harness lesson) but at the CORRECT scope.
+
+WHY a context manager (the on-rig E5-caught defect this module's history
+records): the prior `boot_derived(...) -> BootResult` did teardown in a
+`finally` BEFORE the `return` reached the caller — Python runs `finally`
+before delivering `return`, so the server was torn down BEFORE the
+orchestrator could smoke it -> `ConnectionRefused`, every time, by
+construction. Moving teardown to the CM's `__exit__` keeps the always-
+teardown guarantee while keeping the server alive for boot -> smoke ->
+capture. This is also the reusable lifecycle primitive that the future
+`--keep`/serve path, the §7 soak-continuous path, and `[F]` extended
+capture become additive consumers of (NOT control-flow rewrites).
 
 `BootResult` IS the §6 capture-point-3 payload source (`capture.py` maps it
 to the `{point:"boot", ok, seconds, failure}` artifact — note `endpoint` is
@@ -48,13 +70,14 @@ artifact).
 
 from __future__ import annotations
 
+import contextlib
 import shutil
 import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 from .downloader import sanitize_slug
 
@@ -90,7 +113,9 @@ class BootResult:
 #       block until the server answers (a cheap GET on the OpenAI base) or
 #       raise BootError(reason) on container death / timeout.
 #   .down(project_dir, compose_path) -> None
-#       tear the compose down (ALWAYS called from boot_derived's finally).
+#       tear the compose down (ALWAYS called from booted_derived's
+#       __exit__/finally — i.e. AFTER the `with` body, not before the
+#       handle reaches the caller).
 #
 # E3 tests inject a fixture runner (no Docker). The real runner is below.
 # ---------------------------------------------------------------------------
@@ -153,25 +178,51 @@ class DockerComposeRunner:
 
 
 # ---------------------------------------------------------------------------
-# THE boot stage.
+# THE boot stage — as a live-server lifecycle CONTEXT MANAGER.
+#
+# Teardown is in the CM's `finally` (runs on `__exit__`, i.e. AFTER the
+# `with` body completes — success OR exception), NOT before the handle
+# reaches the caller. This keeps the always-teardown / no-orphan guarantee
+# at the CORRECT scope: the server stays alive for the ENTIRE with-body
+# (boot -> smoke -> capture), then is ALWAYS torn down. Teardown NEVER
+# raises (so an exception in the with-body still propagates, with teardown
+# having run).
 # ---------------------------------------------------------------------------
-def boot_derived(
+@contextlib.contextmanager
+def booted_derived(
     einput, compose_text: str, *, runner: Optional[Any] = None
-) -> BootResult:
+) -> Iterator[BootResult]:
     """Bring up the E1-emitted derived `compose_text` using the proven
     `docker compose --project-directory` discipline against the HF_HOME
     host->container `:ro` mount E1 already wrote into `compose_text` (NOT
-    `MODEL_DIR`).
+    `MODEL_DIR`), `yield` a live `BootResult`-shaped handle WHILE THE SERVER
+    IS UP, then ALWAYS tear the compose down on context-manager exit.
 
-    The compose is written to a fresh project directory; `runner.up` /
-    `runner.wait_ready` are invoked; on success the OpenAI-compatible
-    endpoint is returned for the smoke prober. **The boot is ALWAYS torn
-    down (runner.down) in a finally**, success or failure — no orphaned
-    container/project state (the Pull-Gate on-rig harness lesson).
+    Contract:
+      * The compose is written to a fresh project directory; `runner.up` /
+        `runner.wait_ready` are invoked. On success a `BootResult(ok=True,
+        endpoint=...)` is yielded — **the server is alive for the entire
+        `with` body** (so the orchestrator can smoke + capture against a
+        LIVE server, not a torn-down one).
+      * On an EXPECTED boot failure (`BootError`) a
+        `BootResult(ok=False, failure=..., endpoint=None)` is yielded (the
+        CM does NOT raise for an expected boot failure — the orchestrator
+        must still emit pt3 + capture). Only a truly defensive/unexpected
+        error surfaces (and even then teardown still runs).
+      * Teardown (`runner.down` + `shutil.rmtree(project_dir)`) happens in
+        the `finally` — i.e. on `__exit__`, AFTER the `with` body completes
+        (success OR exception). This PRESERVES the no-orphan guarantee (the
+        Pull-Gate on-rig harness lesson) at the CORRECT scope. Teardown
+        NEVER raises.
 
-    Returns `BootResult` (== the §6 capture-point-3 payload source).
-    `runner` is injectable: default = real `docker compose`; E3 tests pass a
-    fixture runner so there is NO real Docker / GPU in CI.
+    `runner` is injectable: default = real `docker compose`
+    (`DockerComposeRunner`); E3 tests pass a fixture runner so there is NO
+    real Docker / GPU in CI (the real boot is E5, on-rig). The
+    `endpoint`/`host_port` derivation, the `--project-directory` discipline,
+    the HF_HOME absolute-mount reliance, and the `BootResult` field set are
+    byte-unchanged vs the prior implementation — ONLY the teardown *scope*
+    moved from "before the call returns" to "on context-manager exit, after
+    the with-body".
     """
     if runner is None:
         runner = DockerComposeRunner()
@@ -193,32 +244,44 @@ def boot_derived(
 
     started = time.monotonic()
     try:
-        runner.up(project_dir, compose_path)
-        runner.wait_ready(endpoint)
-    except BootError as exc:
-        return BootResult(
-            ok=False,
-            seconds=round(time.monotonic() - started, 3),
-            failure=str(exc) or "container died (no reason surfaced)",
-            endpoint=None,
-        )
-    except Exception as exc:  # pragma: no cover - defensive; runner contract
-        return BootResult(
-            ok=False,
-            seconds=round(time.monotonic() - started, 3),
-            failure=f"unexpected boot error: {exc!r}",
-            endpoint=None,
-        )
-    else:
-        return BootResult(
-            ok=True,
-            seconds=round(time.monotonic() - started, 3),
-            failure=None,
-            endpoint=endpoint,
-        )
+        try:
+            runner.up(project_dir, compose_path)
+            runner.wait_ready(endpoint)
+        except BootError as exc:
+            # EXPECTED boot failure — yield an ok=False handle (do NOT raise
+            # out of the CM; the orchestrator must still emit pt3 + capture).
+            yield BootResult(
+                ok=False,
+                seconds=round(time.monotonic() - started, 3),
+                failure=str(exc) or "container died (no reason surfaced)",
+                endpoint=None,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            # Truly unexpected (runner contract breach) — still yield an
+            # ok=False handle so the orchestrator captures it; teardown in
+            # the finally still runs.
+            yield BootResult(
+                ok=False,
+                seconds=round(time.monotonic() - started, 3),
+                failure=f"unexpected boot error: {exc!r}",
+                endpoint=None,
+            )
+        else:
+            # Server is UP. Yield the live handle for the ENTIRE with-body
+            # (boot -> smoke -> capture). Teardown is deferred to the
+            # finally below (on __exit__, AFTER the body).
+            yield BootResult(
+                ok=True,
+                seconds=round(time.monotonic() - started, 3),
+                failure=None,
+                endpoint=endpoint,
+            )
     finally:
-        # ALWAYS teardown — mirror the Pull-Gate on-rig harness. Never leave
-        # an orphaned container/project; never let teardown raise.
+        # ALWAYS teardown — on __exit__, AFTER the with-body completes
+        # (success OR exception). Mirrors the Pull-Gate on-rig harness
+        # always-teardown rule; never leaves an orphaned container/project;
+        # never lets teardown raise (so a with-body exception still
+        # propagates with teardown having run).
         try:
             runner.down(project_dir, compose_path)
         except Exception:  # pragma: no cover - teardown must never raise
