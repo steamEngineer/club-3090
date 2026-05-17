@@ -503,13 +503,35 @@ def emit_capture(
     smoke_capability_set = list(smoke_result.smoke_capability_set)
     topology_summary_canonical = einput.topology_summary
 
-    outcome = (
-        "smoke-green"
-        if (pt3["ok"] and not smoke_result.partial
-            and all(v == "green" for v in smoke_result.results.values()
-                    if v != "unsmoked"))
-        else "partial-or-failed"
+    # Honest 3-state manifest outcome, derived PURELY from structured truth
+    # already in scope (pt2 download `ok`, pt3 boot `ok`, the locked
+    # `smoke_result.results`/`.partial`) — no new fields, no re-derivation,
+    # no model/network. Precedence is strict: failed > partial > ok.
+    #   - "failed"  : a REAL stage failure — download not ok, OR boot not ok,
+    #                  OR ANY *smoked* capability went "red". (A stage
+    #                  hard-fail dominates even when smoke is absent.)
+    #   - "partial" : NOT failed AND `smoke_result.partial` is True — every
+    #                  smoked cap green but ≥1 cap "unsmoked". Per §6.2 this
+    #                  is a capability-scoped SUCCESS (it merely cannot
+    #                  graduate to Tier-1 for those caps); it is NOT a
+    #                  failure. The floor-green/optionals-unsmoked
+    #                  generic-dense case (e.g. Qwen2.5-0.5B) lands HERE.
+    #   - "ok"      : NOT failed AND NOT partial — everything attempted, all
+    #                  green, nothing unsmoked.
+    # NOTE: this 3-state is the honest INTERIM only — the final anchor-status
+    # taxonomy is owned by the future `[F]` Loop phase (§6.1 classifier /
+    # §6.2 consensus). `[E]` emits honest structured truth; `[F]` classifies.
+    _failed = (
+        not pt2["ok"]
+        or not pt3["ok"]
+        or any(v == "red" for v in smoke_result.results.values())
     )
+    if _failed:
+        outcome = "failed"
+    elif smoke_result.partial:
+        outcome = "partial"
+    else:
+        outcome = "ok"
     submission_fingerprint = _fingerprint([
         model,
         einput.club3090_commit,

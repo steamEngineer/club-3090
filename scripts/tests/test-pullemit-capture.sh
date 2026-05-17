@@ -506,6 +506,126 @@ with tempfile.TemporaryDirectory() as td:
         check("/opt/ai" not in Path(art).read_text(),
               f"redaction: leaky /opt/ai scrubbed from {Path(art).name}")
 
+# ---------------------------------------------------------------------------
+# 5. E-outcome-fix: honest 3-state manifest `outcome` (failed>partial>ok),
+#    derived PURELY from structured truth in scope (download.ok, boot.ok,
+#    smoke.results, smoke.partial). The §6.2 invariant under test: an anchor
+#    with floor-green + optionals-unsmoked is a CAPABILITY-SCOPED SUCCESS
+#    (`outcome=="partial"`) and is explicitly NOT bucketed as a failure
+#    (the old buggy 2-way derivation emitted the literal "partial-or-failed",
+#    conflating partial-success with red — a §1 confidently-wrong defect).
+#    `outcome` remains an input to submission_fingerprint exactly as before;
+#    only its VALUE becomes honest. No new fields; no re-derivation.
+# ---------------------------------------------------------------------------
+SmokeResult = C.SmokeResult
+dl_ok = DownloadResult(ok=True, files=["model.safetensors"],
+                       bytes=1, sha_verified=True, failure=None,
+                       local_dir="/data/hf/club3090/pulls/org-q")
+res_ok = B.BootResult(ok=True, seconds=1.0, failure=None,
+                      endpoint="http://127.0.0.1:8071/v1")
+res_bad = B.BootResult(ok=False, seconds=0.0, failure="CUDA OOM",
+                       endpoint=None)
+cm_ok = {"resolved_image": "vllm/vllm-openai:nightly-deadbeef",
+         "max_model_len": 4096, "kv_format": "bf16", "engine": "v"}
+
+
+def _outcome(*, dl, boot, smoke):
+    with tempfile.TemporaryDirectory() as _td:
+        o = C.emit_capture(
+            ei, confidence=SimpleNamespace(name="EXACT"),
+            raw_verdict="fits-clean", profile_like="vllm/q",
+            download_result=dl, boot_result=boot, smoke_result=smoke,
+            compose_meta=cm_ok, kv_calc_version="kvcalc-v7",
+            repo_root=Path(_td), ts="20260517T140000Z",
+        )
+        return json.loads(Path(o["paths"]["manifest"]).read_text())
+
+
+# (1) THE on-rig Qwen2.5-0.5B case: download ok + boot ok + floor green,
+#     every optional cap "unsmoked" (generic-dense declares none) -> the
+#     §6.2 capability-scoped SUCCESS. MUST be "partial", explicitly NOT
+#     "failed" (this is exactly the defect being corrected).
+sm_floor = SmokeResult(
+    smoke_capability_set=["plain-chat", "streaming"],
+    results={"plain-chat": "green", "streaming": "green",
+             "tool-call": "unsmoked", "reasoning-streaming": "unsmoked",
+             "structured-output": "unsmoked", "vision": "unsmoked",
+             "long-context": "unsmoked"},
+    partial=True, results_detail={})
+m1 = _outcome(dl=dl_ok, boot=res_ok, smoke=sm_floor)
+check(m1["outcome"] == "partial",
+      f"E-outcome-fix (1): floor-green + optionals-unsmoked (on-rig "
+      f"Qwen2.5-0.5B) -> outcome=='partial' — §6.2 capability-scoped "
+      f"SUCCESS (got {m1['outcome']!r})")
+check(m1["outcome"] != "failed",
+      "E-outcome-fix (1): partial-success is EXPLICITLY NOT 'failed' "
+      "(the §1 confidently-wrong defect that was conflated)")
+
+# (2) a "red" SMOKED capability is a genuine failure -> "failed".
+sm_red = SmokeResult(
+    smoke_capability_set=["plain-chat", "streaming"],
+    results={"plain-chat": "green", "streaming": "red",
+             "tool-call": "unsmoked"},
+    partial=True,
+    results_detail={"streaming": {"status": 404, "error": "no model"}})
+m2 = _outcome(dl=dl_ok, boot=res_ok, smoke=sm_red)
+check(m2["outcome"] == "failed",
+      f"E-outcome-fix (2): a 'red' SMOKED cap -> outcome=='failed' "
+      f"(red dominates partial) (got {m2['outcome']!r})")
+
+# (3) boot NOT ok -> "failed" (stage hard-fail dominates; smoke may be
+#     all-green floor but never ran a live server).
+sm_green_floor = SmokeResult(
+    smoke_capability_set=["plain-chat", "streaming"],
+    results={"plain-chat": "green", "streaming": "green",
+             "tool-call": "unsmoked"},
+    partial=True, results_detail={})
+m3 = _outcome(dl=dl_ok, boot=res_bad, smoke=sm_green_floor)
+check(m3["outcome"] == "failed",
+      f"E-outcome-fix (3): boot NOT ok -> outcome=='failed' (stage "
+      f"hard-fail dominates) (got {m3['outcome']!r})")
+
+# (3b) download NOT ok -> "failed" (earliest stage hard-fail dominates).
+dl_bad = DownloadResult(ok=False, files=[], bytes=0, sha_verified=False,
+                        failure="sha256-mismatch", local_dir=None)
+m3b = _outcome(dl=dl_bad, boot=res_ok, smoke=sm_green_floor)
+check(m3b["outcome"] == "failed",
+      f"E-outcome-fix (3b): download NOT ok -> outcome=='failed' "
+      f"(got {m3b['outcome']!r})")
+
+# (4) everything attempted, all green, NOTHING unsmoked -> "ok".
+sm_all = SmokeResult(
+    smoke_capability_set=["plain-chat", "streaming", "tool-call",
+                          "reasoning-streaming", "structured-output",
+                          "vision", "long-context"],
+    results={"plain-chat": "green", "streaming": "green",
+             "tool-call": "green", "reasoning-streaming": "green",
+             "structured-output": "green", "vision": "green",
+             "long-context": "green"},
+    partial=False, results_detail={})
+m4 = _outcome(dl=dl_ok, boot=res_ok, smoke=sm_all)
+check(m4["outcome"] == "ok",
+      f"E-outcome-fix (4): all-green, nothing-unsmoked -> outcome=='ok' "
+      f"(got {m4['outcome']!r})")
+
+# Invariants preserved: the 3 states are exactly {ok,partial,failed}, the
+# legacy buggy literal is GONE, `failure_class` stays null ([F]'s job), and
+# `outcome` is still an input to the §6.2 fingerprint (only its VALUE honest).
+check({m1["outcome"], m2["outcome"], m3["outcome"], m3b["outcome"],
+       m4["outcome"]} == {"partial", "failed", "ok"},
+      "E-outcome-fix: outcome is the honest 3-state {ok,partial,failed}")
+check(all(m["outcome"] != "partial-or-failed"
+          for m in (m1, m2, m3, m3b, m4)),
+      "E-outcome-fix: the buggy 2-way 'partial-or-failed' literal is GONE")
+for _m in (m1, m2, m3, m3b, m4):
+    check(_m["failure_class"] is None,
+          "E-outcome-fix: failure_class STILL null — E3 must NOT classify "
+          "(§6.1 = [F]'s job; only `outcome` value changed)")
+    check(isinstance(_m["submission_fingerprint"], str)
+          and len(_m["submission_fingerprint"]) == 64,
+          "E-outcome-fix: outcome still feeds the 64-hex §6.2 "
+          "submission_fingerprint (composition unchanged, value honest)")
+
 if failures:
     print(f"\n{len(failures)} assertion(s) failed.", file=sys.stderr)
     sys.exit(1)
