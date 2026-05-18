@@ -404,10 +404,152 @@ check(
     "disk-short (gate order is C0 -> C2a, monotonic)",
 )
 
+# ---------------------------------------------------------------------------
+# CONTRACT-2 (§10-R4) — arch-family registry expansion: ZERO FALSE-PASS.
+# ---------------------------------------------------------------------------
+# The expansion must (a) measurably broaden the `--experimental-arch`-free
+# pass rate — a previously `no-arch-row` arch now has a row, so the
+# `--experimental-arch` requirement is gone; AND (b) NEVER false-pass — an
+# `unverified`-TRC expansion row still resolves `needs-trust-remote-code-ack`
+# (fail-closed, bypassable ONLY by `--trust-remote-code`), and an arch that
+# is STILL absent still hard-blocks `no-arch-row`.
+arches_now = G._gc().load_arches(root)
+expansion_arches = [
+    r for r in arches_now
+    if r.get("confidence") == "estimated-lower-bound"
+    and r.get("status") == "unverified"
+]
+check(
+    len(expansion_arches) >= 12,
+    f"CONTRACT-2: registry expansion present "
+    f"({len(expansion_arches)} estimated-lower-bound rows; was a narrow "
+    f"first wave)",
+)
+
+
+def _mk_cfg(slug, arch):
+    r = D.DeriveResult(slug=slug)
+    r.tier1 = None
+    r.profile = {"arch": arch, "auto_map": False, "weight_format": "safetensors"}
+    return r
+
+
+# (a) PhiForCausalLM = the real microsoft/phi-2 C0 case that hard-blocked on
+#     `no-arch-row` during v0.8.2 STEP V1 on-rig validation. With the
+#     expansion it NO LONGER requires `--experimental-arch` ...
+phi = G.c0_engine_support(
+    "vllm/minimal", _mk_cfg("microsoft/phi-2", "PhiForCausalLM"),
+    path="B", hardware_sm=SM_86,
+)
+check(
+    phi.sub_reason != G.C0SubReason.NO_ARCH_ROW
+    and G.BYPASS_EXPERIMENTAL_ARCH not in phi.bypassable_by,
+    f"CONTRACT-2: PhiForCausalLM (microsoft/phi-2 on-rig anchor) no longer "
+    f"requires --experimental-arch (got {phi.state.value}/"
+    f"{phi.sub_reason}/{phi.bypassable_by})",
+)
+# ... yet stays TRC-fail-closed — ZERO FALSE-PASS (never auto-passed; the
+#     unverified-TRC row resolves needs-trc-ack, bypassable ONLY by an
+#     explicit --trust-remote-code).
+check(
+    phi.state == G.C0State.NEEDS_TRC_ACK
+    and phi.bypassable_by == (G.BYPASS_TRUST_REMOTE_CODE,),
+    f"CONTRACT-2 zero-false-pass: PhiForCausalLM stays TRC-fail-closed "
+    f"(needs-trc-ack, --trust-remote-code only; got {phi.state.value}/"
+    f"{phi.bypassable_by})",
+)
+
+# (b) An arch STILL absent from the registry must STILL hard-block
+#     `no-arch-row` requiring `--experimental-arch` (the unsupported-arch
+#     hard-block is intact — the expansion did not weaken the gate).
+absent = G.c0_engine_support(
+    "vllm/minimal", _mk_cfg("acme/exotic", "DefinitelyNotARealArch9000"),
+    path="B", hardware_sm=SM_86,
+)
+check(
+    absent.state == G.C0State.ENGINE_SUPPORT_UNKNOWN
+    and absent.sub_reason == G.C0SubReason.NO_ARCH_ROW
+    and absent.bypassable_by == (G.BYPASS_EXPERIMENTAL_ARCH,),
+    f"CONTRACT-2 zero-false-pass: an unsupported arch STILL hard-blocks "
+    f"no-arch-row (got {absent.state.value}/{absent.sub_reason}/"
+    f"{absent.bypassable_by})",
+)
+
+# (c) Every expansion row's declarative flags are defensible by schema (the
+#     test-patch-attribution arch-schema gate already enforces structure;
+#     here assert the no-false-pass-bearing fields specifically): each
+#     carries unverified TRC + evidence none (so it CANNOT silently pass),
+#     a non-empty integer tp_divisors, and a moe_layout.
+for r in expansion_arches:
+    a = r.get("arch", "<?>")
+    check(
+        r.get("requires_trust_remote_code") == "unverified"
+        and r.get("requires_trust_remote_code_evidence") == "none",
+        f"CONTRACT-2 zero-false-pass: expansion arch {a} is TRC-fail-closed "
+        f"(unverified + evidence none)",
+    )
+    vt = r.get("valid_tp") or {}
+    check(
+        isinstance(vt.get("tp_divisors"), list)
+        and bool(vt.get("tp_divisors"))
+        and all(isinstance(x, int) for x in vt["tp_divisors"])
+        and vt.get("moe_layout") in {"dense", "moe"},
+        f"CONTRACT-2: expansion arch {a} carries defensible declarative "
+        f"flags (tp_divisors + moe_layout)",
+    )
+
+# (d) #146-shape worked acceptance case (do NOT fetch the PR). PR #146
+#     hand-edited compose_registry.py + qwen3.6-27b.yml to add an
+#     `awq_bf16_int4` variant. The expanded machinery must cleanly
+#     absorb/validate exactly this shape: a manually-added model-YAML
+#     weights variant is well-formed AND any registry entry that uses it
+#     resolves to a launchable compose whose backing arch
+#     (Qwen3NextForCausalLM — already a verified row) has defensible flags.
+import copy  # noqa: E402
+
+import yaml as _yaml  # noqa: E402
+
+_m = _yaml.safe_load(
+    (root / "scripts/lib/profiles/models/qwen3.6-27b.yml").read_text()
+)
+# Synthesize the #146-shaped manual addition in-memory (no repo mutation).
+_synth = copy.deepcopy(_m)
+_synth["weights"]["awq_bf16_int4"] = {
+    "path": "qwen3.6-27b-awq-bf16-int4",
+    "size_gb": 17.0,
+    "format": "awq",
+    "status": "experimental",
+}
+_v = _synth["weights"]["awq_bf16_int4"]
+check(
+    {"path", "size_gb", "format", "status"} <= set(_v)
+    and isinstance(_v["size_gb"], (int, float))
+    and _v["format"] in {"awq", "autoround", "gguf", "bf16", "int8"},
+    "CONTRACT-2 #146-shape: a hand-added awq_bf16_int4 weights variant is "
+    "schema-well-formed (the expanded machinery absorbs the manual add)",
+)
+# Its backing arch is the already-verified Qwen3NextForCausalLM row — the
+# expansion's flag schema validates it: defensible (status verified,
+# confidence exact, real TRC evidence), launchable on a loads:true pin.
+_qn = next(
+    (r for r in arches_now if r.get("arch") == "Qwen3NextForCausalLM"), None
+)
+check(
+    _qn is not None
+    and _qn.get("status") == "verified"
+    and _qn.get("confidence") == "exact"
+    and _qn.get("requires_trust_remote_code") == "false"
+    and _qn.get("requires_trust_remote_code_evidence") not in (None, "", "none")
+    and any(p.get("loads") for p in _qn.get("engine_pin") or []),
+    "CONTRACT-2 #146-shape: the awq_bf16_int4 variant's backing arch "
+    "(Qwen3NextForCausalLM) carries defensible flags (verified/exact, real "
+    "TRC evidence, loads:true pin) — the worked-case validates cleanly",
+)
+
 if failures:
     print(f"\n{len(failures)} assertion(s) failed.", file=sys.stderr)
     sys.exit(1)
-print("\nAll Pull-Gate gates (stratum-2 + [C0] + [C2a]) assertions passed.")
+print("\nAll Pull-Gate gates (stratum-2 + [C0] + [C2a] + CONTRACT-2) assertions passed.")
 PY
 
 echo "test-pullgate-gates.sh OK"
