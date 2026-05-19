@@ -16,6 +16,51 @@ history; SemVer takes over from `v0.3.0` onward.
 
 ---
 
+## v0.8.2 — 2026-05-19
+
+
+### ✨ Features
+
+- feat(pull): v0.8.2 STEP V5 — recommend UX + report-a-failed-pull doc + §9-reconciliation ([c5b5e9b](https://github.com/noonghunna/club-3090/commit/c5b5e9b27e24c04a880a0504b7497e266c2c8044))
+- feat(nvlink): auto-detect NVLink on N-GPU topologies; add detection to multi4 + gemma-4-26b dual ([8f8ec1c](https://github.com/noonghunna/club-3090/commit/8f8ec1cebe375cf687550ce1724d1545386f36e4))
+- feat(pull): v0.8.2 STEP V4 — optional whichllm hw-detect subprocess (CONTRACT-3, hw-detect-only) ([3917728](https://github.com/noonghunna/club-3090/commit/39177282b793549e6e4f2ac960358f0204c9cc5e))
+- feat(switch): v0.8.2 STEP V3 — switch.sh ↔ compose_registry parity (CONTRACT-2b-ii) ([e6503bc](https://github.com/noonghunna/club-3090/commit/e6503bc046e569a7d6adac46dc768418bd14f0a8))
+- feat(pull): v0.8.2 STEP V3 — arch-registry expansion + chat-template attribution/drift_guard ([999c93f](https://github.com/noonghunna/club-3090/commit/999c93fe8c3629b484d5901de7e58dda84ad39b4))
+- feat(pull): v0.8.2 STEP V2 — surface pointer + --submit-last/--submit (gh + gh-less, consented, F5 reuse) ([e1cdcb5](https://github.com/noonghunna/club-3090/commit/e1cdcb53c7c9ff32e5eb101df15944d0f99747d2))
+- feat(pull): v0.8.2 STEP V1 — capture-on-hard-block pt1-gate emitter + BaseCaptureBundle protocol lift ([20f1557](https://github.com/noonghunna/club-3090/commit/20f1557d2992fa2d0362e0e95ee9b9264199cc38))
+- feat(report): lspci PCIe/P2P diagnostics subsection (LnkSta/ACS/topology) (#148) ([af2e45a](https://github.com/noonghunna/club-3090/commit/af2e45ae96376a781b15f9cf8c6896e1b3ecf5ae))
+
+
+### 🐛 Bug fixes
+
+- fix(pull): v0.8.2 STEP V5 — recommend must not label a fits-clean model "DOES NOT FIT" ([26949d7](https://github.com/noonghunna/club-3090/commit/26949d7fa845979f2234a961abb53b3fedef3062))
+- fix(pull): v0.8.2 STEP V3 — deliver CONTRACT-2's engine-supported broadening (TRC two-class) ([d78b9a9](https://github.com/noonghunna/club-3090/commit/d78b9a94963c581061c01b413827630cd65aafdd))
+- fix(pull): v0.8.2 STEP V2 — gh-less issue body must not carry the absolute capture path ([52451ca](https://github.com/noonghunna/club-3090/commit/52451ca0b0b190eb6c194917f9aa7a0dba8155e0))
+- fix(launch): force LC_NUMERIC=C so the VRAM-budget printf survives comma-decimal locales (#159) ([186dc93](https://github.com/noonghunna/club-3090/commit/186dc93fae60d7047a790033176f1c3c2e0bd54a))
+- fix(deriver): correct stale "GGUF not supported until v0.8.1" message — now misleading post-v0.8.1-ship ([344ab87](https://github.com/noonghunna/club-3090/commit/344ab87dd3723cf0fc30834141c2ccb17f25f507))
+
+
+### 📝 Documentation
+
+- docs(architecture): bring current-state docs up to v0.8.2 (recommend / submit on-ramp / arch-registry / hwdetect) ([c5c8f46](https://github.com/noonghunna/club-3090/commit/c5c8f469b09ef17252cf2a4fd0a587ae9e9a2adf))
+- docs(generator): state plainly that generated-compose capacity is the reference profile's, NOT fit-adapted ([247b1dc](https://github.com/noonghunna/club-3090/commit/247b1dcfe859f0da439d1bc41d21cd3e9efb8970))
+- docs(pull): v0.8.2 STEP V6 — correct §9/headline to the true bundled release scope ([b791271](https://github.com/noonghunna/club-3090/commit/b79127176f34f67258e0dc50b1992032fa1c653e))
+- docs: fix duplicate MULTI_CARD.md entry in docs index ([966a8d1](https://github.com/noonghunna/club-3090/commit/966a8d142f0c66f9a5ccde3d9adca39b575e5482))
+- docs: reorder docsindex (GSD first), add FAQ TOC + promote troubleshooting ladder, add tool-calling example ([a891b39](https://github.com/noonghunna/club-3090/commit/a891b3921f8fd598237d4649b68dd552419583e8))
+- docs: add GETTING_STARTED.md, Gemma 4 model READMEs, restructure main README with quick start first ([6368bae](https://github.com/noonghunna/club-3090/commit/6368bae648684c6e2c9645dc96bcf5aa7f5d1b05))
+- docs: fix stale NVLINK_MODE comment, INTERNALS.md cliff status, and dead companion repo link ([28bd0e8](https://github.com/noonghunna/club-3090/commit/28bd0e89703b1c5052990dd071d4debb758867ce))
+- docs(container-runtimes): Proxmox passthrough — NVLink is the fragile path, not Proxmox (#161) ([3f066a0](https://github.com/noonghunna/club-3090/commit/3f066a044dceb918709fa32a931511980b2cb0fc))
+- docs(benchmarks): add @hlo-world dual-3090 PCIe x4 dual-dflash-noviz row (#158) ([135f2c4](https://github.com/noonghunna/club-3090/commit/135f2c48fd25b782a7f5c74b4ca828cb4682f812))
+- docs(upstream): froggeric v19 re-eval PASSED — ADOPTED (#150) ([ec1fd65](https://github.com/noonghunna/club-3090/commit/ec1fd652e8b02aa1f752d581f6e8c1fd5fdef0f3))
+
+
+### 🧹 Maintenance
+
+- chore(chat-template): re-vendor latest froggeric Qwen3.6 template for re-eval (#150) ([8a9ea6c](https://github.com/noonghunna/club-3090/commit/8a9ea6ca45489ad8520d65a097203d4da1d78989))
+
+
+
+[Pin: `git checkout v0.8.2`] · [Full diff](https://github.com/noonghunna/club-3090/compare/v0.8.1...v0.8.2)
 ## v0.8.1 — 2026-05-17
 
 
