@@ -127,7 +127,13 @@ For the cross-card TP=2 picture, see [`DUAL_CARD.md`](DUAL_CARD.md).
 
 **Workload:** multimodal chat, screenshot-debugging, vision-aware code review, UI-screenshot agents. The first stack profile combining MTP + vision on a single 3090 (the older "strip mmproj when MTP" rule was obsolete on build 9235 — sweep-verified 2026-05-19).
 
-`bash scripts/switch.sh llamacpp/mtp-vision`. Same Q4_K_M MTP GGUF + q4_0 KV + MTP `n=2` + `-ub 1024`, **with `--mmproj mmproj-F16.gguf` mounted**. Ctx 49K (vision overhead trades against KV pool — 49K is the safe-headroom max with mmproj on 24 GB). **~57 narr / ~66 code TPS** (text path), vision overhead paid once at image-encode, not per decoded token. Verify-stress 7/7 at this config.
+`bash scripts/switch.sh llamacpp/mtp-vision`. Same Q4_K_M MTP GGUF + q4_0 KV + MTP `n=2` + `-ub 1024`, **with `--mmproj mmproj-F16.gguf` mounted**. Ctx 49K is the **speed-optimal** default (vision overhead trades against KV pool). **~57 narr / ~66 code TPS** (text path), vision overhead paid once at image-encode, not per decoded token. Verify-stress 7/7 at this config.
+
+> **Need more context for agentic vision workloads?** Drop `-ub 1024 → 512` and you can push ctx to **192K** with full cliff coverage (verify-stress 7/7 incl. 91K needle), at the cost of ~10% TPS:
+> ```bash
+> UBATCH_SIZE=512 CTX_SIZE=196608 bash scripts/switch.sh llamacpp/mtp-vision
+> ```
+> Sweep data + reasoning in [`models/qwen3.6-27b/llama-cpp/README.md`](../models/qwen3.6-27b/llama-cpp/README.md#speed-vs-context--pick-your-trade-off). Surfaced 2026-05-20 by @JensJN in [#170](https://github.com/noonghunna/club-3090/discussions/170).
 
 ---
 
