@@ -6,48 +6,50 @@
 #   Drafter:   MTP n=2 (--spec-type draft-mtp, sweet spot)
 #   KV:        q4_0 K + q4_0 V
 #   Vision:    YES (mmproj-F16 mounted — multimodal input enabled)
-#   Max ctx:   49152 (safe-headroom max with vision on 24 GB; sweep-verified)
+#   Max ctx:   163840 default (160K, verified); up to 192K with UBATCH_SIZE=512
 #   Genesis:   N/A — llama.cpp engine
 #   Status:    ✅ Production (NEW — first stack profile combining MTP + vision)
 #   Engine-profile: llama-cpp-local
 #   Best for:  Multimodal chat, screenshot-debugging, vision-aware code review.
 #              ~51/60 TPS text + vision overhead paid once at image-encode.
+#              160K default ctx (sweep-verified 2026-05-22); 192K with -ub 512.
 # ---------------------------------------------------------------------------
-# Qwen3.6-27B on llama.cpp — single 3090, MTP, 49K ctx, VISION ON.
+# Qwen3.6-27B on llama.cpp — single 3090, MTP, 160K ctx, VISION ON.
 #
-# This is one of three named single-card profiles for this model:
-#   - docker-compose.yml  → vanilla 262K + vision, cliff-immune fallback
-#   - mtp.yml             → MTP n=2 + 131K + no vision (fast + ctx)
-#   - mtp-vision.yml      → MTP n=2 + 49K + vision (THIS file — multimodal + fast)
+# This is one of two named single-card profiles for this model:
+#   - mtp.yml             → MTP n=2 + 262K + no vision (fast + max ctx)
+#   - mtp-vision.yml      → MTP n=2 + 160K + vision (THIS file — multimodal)
 #
 # Historical note: the older single compose stripped --mmproj when MTP was
 # enabled, treating MTP + vision as incompatible. **That rule was obsolete
 # on build 9235** — sweep-verified 2026-05-19 that MTP + vision coexist
 # cleanly, this profile is the first to ship the combination.
 #
-# Stack-wide thinking-off-by-default policy applies (same as mtp.yml). Native
-# template (NOT froggeric) + `--reasoning off`. Cliff-survival: -ub 1024.
+# Stack-wide thinking-off-by-default policy applies (same as mtp.yml): native
+# (GGUF-embedded) template + `--reasoning off`. (froggeric v19 was A/B'd on the
+# text profile and regressed the 8-pack on mainline llama.cpp — native is the
+# default on both mainline composes.) Default -b 1024 / -ub 1024.
 #
 # VRAM budget on 24 GB (Q4_K_M + vision):
 #   weights (Q4_K_M):              ~17.0 GB
-#   KV at 49K (q4_0 K+V):           ~1.9 GB
+#   KV at 160K (q4_0 K+V):          ~4.0 GB
 #   mmproj F16 (vision projector):  ~0.8 GB
 #   MTP draft head + overhead:      ~0.5 GB
-#   total:                         ~20.2 GB
-#   headroom:                       ~2.0 GB for prompt + activation peaks +
+#   total:                         ~22.3 GB
+#   headroom:                       ~1.7 GB for prompt + activation peaks +
 #                                   image-encode tile buffer
 #
-# Why 49K ctx (vs mtp.yml's 131K): the mmproj F16 plus image-encode tile
+# Why 160K ctx (vs mtp.yml's 262K): the mmproj F16 plus image-encode tile
 # buffers consume the headroom that the no-vision profile spends on KV.
-# 49K is the safe-headroom DEFAULT — conservative so it boots cleanly across
-# varied single-3090 rigs (desktop/driver/WSL overhead differs).
+# 160K is the DEFAULT — verified on this rig (2026-05-22). Up to 192K with
+# UBATCH_SIZE=512. Conservative rigs can lower to 131K for more headroom.
 #
 # ⭐ NEED MORE CONTEXT WITH VISION? Drop the micro-batch to free KV budget:
 #
 #     UBATCH_SIZE=512 CTX_SIZE=196608 docker compose -f mtp-vision.yml up -d
 #     # or:  UBATCH_SIZE=512 CTX_SIZE=196608 bash scripts/switch.sh llamacpp/mtp-vision
 #
-#   `-ub 512` frees ~1 GB to the KV pool → up to 4× the context (49K → 192K)
+#   `-ub 512` frees ~1 GB to the KV pool → up to 192K context
 #   WITH vision still loaded. Trade-off: ~10% slower PREFILL (more, smaller
 #   micro-batches); DECODE TPS is unaffected. It's also MORE cliff-safe, not
 #   less — smaller -ub lowers the per-pass activation peak (verify-stress 7/7
@@ -57,7 +59,7 @@
 #   ⚠ Always run `bash scripts/verify-stress.sh` at your chosen CTX_SIZE to
 #   confirm needle recall + no boot-OOM on YOUR rig before relying on it —
 #   192K is rig-validated but headroom varies (driver/desktop overhead).
-#   We keep the DEFAULT conservative at 49K because the optimal -ub is
+#   The DEFAULT is 160K @ -ub 1024 because the optimal -ub is
 #   workload-conditional: context-heavy → 512, speed/prefill-heavy → 1024.
 #
 # Quick start:
@@ -76,9 +78,9 @@
 #   MMPROJ_FILE            path under /models  (default: qwen3.6-27b-gguf/mmproj-F16.gguf)
 #   IMAGE_MIN_TOKENS       min tokens / image  (default: 1024 — matches ik vision profile)
 #   IMAGE_MAX_TOKENS       max tokens / image  (default: 4096 = ~4M px / 2048²; lower → more ctx room)
-#   CTX_SIZE               KV pool size        (default: 163840 = 160K @ -ub 512; full-res 2048² image validated @ ~22.2 GB / 24, 2026-05-22. ~196K feasible w/ smaller -ub)
+#   CTX_SIZE               KV pool size        (default: 163840 = 160K @ -ub 1024; full-res 2048² image validated @ ~22.2 GB / 24, 2026-05-22. ~196K feasible w/ -ub 512)
 #   BATCH_SIZE             llama.cpp -b        (default: 4096 — on mainline -b does NOT drive VRAM; -ub does)
-#   UBATCH_SIZE            llama.cpp -ub       (default: 512 — the VRAM lever on mainline; funds the 160K ctx + encode buffer)
+#   UBATCH_SIZE            llama.cpp -ub       (default: 1024; set 512 for up to 192K ctx, ~10% prefill cost)
 #   KV_TYPE                K and V quant type  (default: q4_0)
 #   MTP_DRAFT_N_MAX        MTP draft tokens    (default: 2)
 #   REASONING              thinking gate       (default: off)
@@ -103,8 +105,8 @@ services:
       --image-min-tokens ${IMAGE_MIN_TOKENS:-1024}
       --image-max-tokens ${IMAGE_MAX_TOKENS:-4096}
       -c ${CTX_SIZE:-163840}
-      -b ${BATCH_SIZE:-4096}
-      -ub ${UBATCH_SIZE:-512}
+      -b ${BATCH_SIZE:-1024}
+      -ub ${UBATCH_SIZE:-1024}
       -ngl 99
       -fa on
       --cache-type-k ${KV_TYPE:-q4_0}
