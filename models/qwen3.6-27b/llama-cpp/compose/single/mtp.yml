@@ -83,6 +83,13 @@ services:
       - "${ESTATE_PORT:-${PORT:-8020}}:8080"
     volumes:
       - "${MODEL_DIR:-../../../../../models-cache}:/models:ro"
+    # ⚠ -np 1 is intentional on a single 24 GB card — do NOT raise it to
+    #   "parallelize." One GPU is compute-bound: extra slots divide its
+    #   throughput, they don't multiply it. At -np 4 each slot fell to
+    #   ~14 tok/s here — slow enough to trip agentic clients' per-request
+    #   timeouts (aider ran 1/30) — and -np>1 also auto-disables MTP and
+    #   can OOM the spec-context buffer. On a higher-throughput card (e.g.
+    #   5090) or multi-GPU the trade may flip — re-validate before raising.
     command: >-
       --host 0.0.0.0
       --port 8080
@@ -94,13 +101,6 @@ services:
       -fa on
       --cache-type-k ${KV_TYPE:-q4_0}
       --cache-type-v ${KV_TYPE:-q4_0}
-      # ⚠ -np 1 is intentional on a single 24 GB card — do NOT raise it to
-      #   "parallelize." One GPU is compute-bound: extra slots divide its
-      #   throughput, they don't multiply it. At -np 4 each slot fell to
-      #   ~14 tok/s here — slow enough to trip agentic clients' per-request
-      #   timeouts (aider ran 1/30) — and -np>1 also auto-disables MTP and
-      #   can OOM the spec-context buffer. On a higher-throughput card (e.g.
-      #   5090) or multi-GPU the trade may flip — re-validate before raising.
       -np ${NP:-1}
       --spec-type draft-mtp
       --spec-draft-n-max ${MTP_DRAFT_N_MAX:-2}
