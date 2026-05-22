@@ -5,7 +5,8 @@
 #   Topology:  Single 3090 (TP=1)
 #   Drafter:   MTP n=2, p-min 0.0 (built-in MTP head)
 #   KV:        q4_0 K + q4_0 V
-#   Template:  froggeric v19 (--chat-template-file)
+#   Template:  native (GGUF-embedded) — froggeric v19 A/B'd on the text sibling,
+#              native won the 8-pack 103 vs 99 (toolcall TIED); see iq4ks-mtp.yml
 #   Vision:    YES (mmproj-F16 mounted — multimodal input enabled)
 #   Default ctx: 163840 (160K) — full-res-vision default on ONE 3090, chosen for
 #              HEADROOM: 172K served single images but OOM-crashed under heavy
@@ -20,7 +21,7 @@
 #   Best for:  Multimodal chat / screenshot-debugging on ik_llama IQ4_KS.
 # ---------------------------------------------------------------------------
 # This is the VISION sibling of iq4ks-mtp.yml. Everything matches that file
-# (config source, justified deviations, froggeric validation) EXCEPT:
+# (config source, justified deviations, native-template A/B result) EXCEPT:
 #   + --mmproj + --image-{min,max}-tokens (vision projector mounted)
 #   + default ctx 160K + -b 1024 (vs the text profile's 262K + -b 4096)
 #
@@ -55,9 +56,10 @@
 #     image request AND `scripts/verify-stress.sh` (encode + prefill peaks are
 #     spiky; a tight config that serves one image can still OOM under load).
 #
-# Thinking-off: native lever is --reasoning off; validated to work WITH the
-# froggeric v19 template on ik_llama (2026-05-21) — clean suppression + tool
-# calls render. See ../../patches/froggeric-chat-template/PROVENANCE.md.
+# Thinking-off: native (GGUF-embedded) template + --reasoning off — clean
+# suppression on ik_llama (validated 2026-05-22). froggeric v19 was A/B'd on
+# the text sibling and LOST the 8-pack (99 vs native 103, toolcall tied), so
+# both ik profiles default native. (vLLM keeps its own froggeric copy.)
 #
 # Quick start:
 #   1. GGUF + vision projector:
@@ -86,7 +88,6 @@
 #   MTP_DRAFT_N_MAX      MTP draft tokens   (default: 2)
 #   DRAFT_P_MIN          draft accept floor (default: 0.0)
 #   REASONING            thinking gate      (default: off)
-#   CHAT_TEMPLATE_FILE   chat template path (default: /etc/qwen-froggeric-chat-template.jinja = v19)
 #   PORT                 host port          (default: 8020)
 #   CUDA_VISIBLE_DEVICES which GPU to use   (default: 0)
 
@@ -95,15 +96,18 @@ services:
     image: ${IK_LLAMA_IMAGE:-ghcr.io/ikawrakow/ik-llama-cpp:cu13-server}
     container_name: "${ESTATE_CONTAINER:-ik-llama-qwen36-27b}"
     restart: unless-stopped
-    ipc: host
     ports:
       - "${ESTATE_PORT:-${PORT:-8020}}:8080"
     volumes:
       - "${MODEL_DIR:-../../../../../models-cache}:/models:ro"
-      # froggeric v19 chat template (validated on ik_llama 2026-05-21 — see
-      # ../../patches/froggeric-chat-template/PROVENANCE.md).
-      - "../../patches/froggeric-chat-template/chat_template_v19.jinja:/etc/qwen-froggeric-chat-template.jinja:ro"
     # server target ENTRYPOINT is /app/llama-server — args only below.
+    # ⚠ -np 1 is intentional on a single 24 GB card — do NOT raise it to
+    #   "parallelize." One GPU is compute-bound: extra slots divide its
+    #   throughput, they don't multiply it. At -np 4 each slot fell to
+    #   ~14 tok/s here — slow enough to trip agentic clients' per-request
+    #   timeouts (aider ran 1/30) — and -np>1 also auto-disables MTP and
+    #   can OOM the spec-context buffer. On a higher-throughput card (e.g.
+    #   5090) or multi-GPU the trade may flip — re-validate before raising.
     command: >-
       --host 0.0.0.0
       --port 8080
@@ -119,18 +123,18 @@ services:
       -ctk ${KV_TYPE:-q4_0}
       -ctv ${KV_TYPE:-q4_0}
       -khad
+      -vhad
       -ngld 99
       --multi-token-prediction
       --draft-max ${MTP_DRAFT_N_MAX:-2}
       --draft-p-min ${DRAFT_P_MIN:-0.0}
+      --recurrent-ckpt-mode auto
       --merge-qkv
       -fa on
       --jinja
-      --chat-template-file ${CHAT_TEMPLATE_FILE:-/etc/qwen-froggeric-chat-template.jinja}
       --parallel-tool-calls
       --reasoning ${REASONING:-off}
       --reasoning-format ${REASONING_FORMAT:-deepseek}
-      --chat-template-kwargs '{"preserve_thinking":true}'
     deploy:
       resources:
         reservations:

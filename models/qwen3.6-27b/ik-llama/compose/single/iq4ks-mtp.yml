@@ -4,10 +4,12 @@
 #   Engine:    ik_llama.cpp (ghcr.io/ikawrakow/ik-llama-cpp:cu13-server)
 #   Topology:  Single 3090 (TP=1)
 #   Drafter:   MTP n=2, p-min 0.0 (built-in MTP head)
-#   KV:        q4_0 K + q4_0 V (default — max-context-first; -khad Hadamard
-#              K-cache for quantized-KV accuracy. KV_TYPE=q8_0 = ampersandru's,
-#              higher KV fidelity, caps ~131-200K ctx)
-#   Template:  froggeric v19 (--chat-template-file) — see volumes block
+#   KV:        q4_0 K + q4_0 V (default — max-context-first; -khad/-vhad
+#              Hadamard transforms on K and V caches for quantized-KV accuracy,
+#              no VRAM cost. KV_TYPE=q8_0 = ampersandru's, higher KV fidelity,
+#              caps ~131-200K ctx)
+#   Template:  native (GGUF-embedded) — A/B'd froggeric v19 here, native won
+#              the 8-pack 103 vs 99 (toolcall TIED 9/9); see header note below
 #   Vision:    NO (text-only this profile; mmproj is a separate axis → -vision.yml)
 #   Default ctx: 262144 — full native ctx (n_ctx_train) on ONE 3090, q4_0 KV.
 #              Bumped from 131072 → native max 2026-05-21, keeping -ub 1024 (NOT
@@ -41,6 +43,13 @@
 #      ON; short-budget requests return empty content (all tokens spent in
 #      <think>). Bench passes enable_thinking=false anyway; this aligns the
 #      raw endpoint to the same policy.
+#   3. NATIVE chat template (no --chat-template-file). We A/B'd froggeric v19
+#      here (it loads + suppresses thinking fine) but native scored HIGHER on
+#      the 8-pack: 103 vs 99, with the toolcall pack TIED 9/9 and the agentic
+#      hermesagent pack favouring native (12 vs 11). froggeric's template fixes
+#      help the vLLM/qwen3_coder parser path (#157, +10pp there) but bring no
+#      measurable gain on ik_llama's parser — so native is the default here
+#      too. (vLLM keeps its own froggeric copy under vllm/patches/.)
 #
 # Engine pinned by digest (engine policy):
 #   ghcr.io/ikawrakow/ik-llama-cpp:cu13-server
@@ -67,15 +76,14 @@
 #   DRAFT_P_MIN          draft accept floor (default: 0.0)
 #   REASONING            thinking gate      (default: off; set 'on' to enable reasoning — see below)
 #   REASONING_FORMAT     reasoning routing  (default: deepseek)
-#   CHAT_TEMPLATE_FILE   chat template path (default: /etc/qwen-froggeric-chat-template.jinja = v19)
 #
-# ⭐ TEST WITH REASONING ON (one env flip — machinery is pre-wired):
+# ⭐ TEST WITH REASONING ON (one env flip):
 #     REASONING=on MODEL_DIR=/your/models docker compose -f iq4ks-mtp.yml up -d
-#   The reasoning-format (deepseek) + chat-template-kwargs preserve_thinking:true
-#   are always present; only the --reasoning gate flips. When ON, also tune MTP
-#   deeper (MTP_DRAFT_N_MAX=5 DRAFT_P_MIN=0.5) — reasoning text drafts well, so
-#   a deeper draft pays off (Vincent's thinking-on profile). Default-off keeps
-#   n=2/p-min 0.0 (the thinking-off sweet spot).
+#   The reasoning-format (deepseek) routing is always present; only the
+#   --reasoning gate flips. When ON, also tune MTP deeper (MTP_DRAFT_N_MAX=5
+#   DRAFT_P_MIN=0.5) — reasoning text drafts well, so a deeper draft pays off
+#   (Vincent's thinking-on profile). Default-off keeps n=2/p-min 0.0 (the
+#   thinking-off sweet spot).
 #   PORT                 host port          (default: 8020)
 #   CUDA_VISIBLE_DEVICES which GPU to use   (default: 0)
 
@@ -84,16 +92,18 @@ services:
     image: ${IK_LLAMA_IMAGE:-ghcr.io/ikawrakow/ik-llama-cpp:cu13-server}
     container_name: "${ESTATE_CONTAINER:-ik-llama-qwen36-27b}"
     restart: unless-stopped
-    ipc: host
     ports:
       - "${ESTATE_PORT:-${PORT:-8020}}:8080"
     volumes:
       - "${MODEL_DIR:-../../../../../models-cache}:/models:ro"
-      # froggeric v19 chat template (fixes 7 Qwen3.6 template bugs; 2 target
-      # the tool-call path). Validated on ik_llama 2026-05-21: --reasoning off
-      # suppresses thinking cleanly + tool-calls render. See ../../patches/.../PROVENANCE.md.
-      - "../../patches/froggeric-chat-template/chat_template_v19.jinja:/etc/qwen-froggeric-chat-template.jinja:ro"
     # server target ENTRYPOINT is /app/llama-server — args only below.
+    # ⚠ -np 1 is intentional on a single 24 GB card — do NOT raise it to
+    #   "parallelize." One GPU is compute-bound: extra slots divide its
+    #   throughput, they don't multiply it. At -np 4 each slot fell to
+    #   ~14 tok/s here — slow enough to trip agentic clients' per-request
+    #   timeouts (aider ran 1/30) — and -np>1 also auto-disables MTP and
+    #   can OOM the spec-context buffer. On a higher-throughput card (e.g.
+    #   5090) or multi-GPU the trade may flip — re-validate before raising.
     command: >-
       --host 0.0.0.0
       --port 8080
@@ -106,18 +116,18 @@ services:
       -ctk ${KV_TYPE:-q4_0}
       -ctv ${KV_TYPE:-q4_0}
       -khad
+      -vhad
       -ngld 99
       --multi-token-prediction
       --draft-max ${MTP_DRAFT_N_MAX:-2}
       --draft-p-min ${DRAFT_P_MIN:-0.0}
+      --recurrent-ckpt-mode auto
       --merge-qkv
       -fa on
       --jinja
-      --chat-template-file ${CHAT_TEMPLATE_FILE:-/etc/qwen-froggeric-chat-template.jinja}
       --parallel-tool-calls
       --reasoning ${REASONING:-off}
       --reasoning-format ${REASONING_FORMAT:-deepseek}
-      --chat-template-kwargs '{"preserve_thinking":true}'
     deploy:
       resources:
         reservations:

@@ -39,9 +39,12 @@ Five recommended options on Genesis v7.69 + vllm#35975 backport (2026-05-02 PM):
 | **Long ctx, text-only — Balanced MTP** ⭐ (RAG, codebase, IDE agents, default) | [`long-text.yml`](../models/qwen3.6-27b/vllm/compose/single/long-text.yml) | **180K** | 50 / 67 | ~22.3 GB (mem-util 0.93) |
 | **Long ctx, text-only — Max-context** (long single-shot RAG / codebase analysis) | [`long-text-no-mtp.yml`](../models/qwen3.6-27b/vllm/compose/single/long-text-no-mtp.yml) (NEW) | **200K** | TBD/TBD (slow decode, no MTP) | ~21.0 GB (mem-util 0.95) |
 | **Bounded thinking** (coding agents, structured-CoT — recommended grammar: DeepSeek scratchpad, 87.4% combined HE+/LCB v6) — see [STRUCTURED_COT.md](STRUCTURED_COT.md) | [`bounded-thinking.yml`](../models/qwen3.6-27b/vllm/compose/single/bounded-thinking.yml) | **180K** | 50 / 66 | ~21.7 GB (mem-util 0.95) |
-| **Bulletproof, no cliffs** (production service, unpredictable inputs) | [`llamacpp/default`](../models/qwen3.6-27b/llama-cpp/compose/single/docker-compose.yml) | **262K** | 21 / 21 | ~20 GB |
+| **Bulletproof, no cliffs** (production service, unpredictable inputs) | [`llamacpp/default`](../models/qwen3.6-27b/llama-cpp/compose/single/mtp.yml) (alias of `llamacpp/mtp`) | **262K** (via `-ub 512`) | 52 / 61 | ~23 GB |
 | **llama.cpp + MTP, fast + long ctx** ⭐ (IDE agents, opencode, Hermes, long-multi-turn agentic) | [`llamacpp/mtp`](../models/qwen3.6-27b/llama-cpp/compose/single/mtp.yml) | **131K** | **51 / 60** | ~22.5 GB |
 | **llama.cpp + MTP + vision** (multimodal chat, screenshot-debugging, vision-aware review) | [`llamacpp/mtp-vision`](../models/qwen3.6-27b/llama-cpp/compose/single/mtp-vision.yml) | **49K** | **57 / 66** | ~20.5 GB |
+| **ik_llama + IQ4_KS + MTP** ⭐ (best quality-per-bit GGUF, advanced-quant track) | [`iq4ks-mtp`](../models/qwen3.6-27b/ik-llama/compose/single/iq4ks-mtp.yml) | **262K** | **~62 / ~69** | ~22.5 GB |
+| **ik_llama + IQ4_KS + MTP + vision** | [`iq4ks-mtp-vision`](../models/qwen3.6-27b/ik-llama/compose/single/iq4ks-mtp-vision.yml) | **160K** | TBD | ~21 GB |
+| **ik_llama + two-stage spec-dec** 🧪 (ngram+MTP, code-optimized, experimental) | [`iq4ks-two-stage`](../models/qwen3.6-27b/ik-llama/compose/single/iq4ks-two-stage.yml) | **131K** | TBD | ~22 GB |
 | **Small-context vLLM safe path** ([@stiggy2k16](https://github.com/noonghunna/club-3090/issues/43) data point) — IDE agents capped at <60K accumulated, when you need vLLM speed but llama.cpp is too slow | [`minimal.yml`](../models/qwen3.6-27b/vllm/compose/single/minimal.yml) at `--gpu-memory-utilization 0.95 --max-model-len 65536` | **64K** | ~32 / ~33 (no MTP) | ~22.4 GB |
 
 Run via `bash scripts/launch.sh` (interactive) or `bash scripts/switch.sh <variant>`.
@@ -134,6 +137,22 @@ For the cross-card TP=2 picture, see [`DUAL_CARD.md`](DUAL_CARD.md).
 > UBATCH_SIZE=512 CTX_SIZE=196608 bash scripts/switch.sh llamacpp/mtp-vision
 > ```
 > Sweep data + reasoning in [`models/qwen3.6-27b/llama-cpp/README.md`](../models/qwen3.6-27b/llama-cpp/README.md#speed-vs-context--pick-your-trade-off). Surfaced 2026-05-20 by @JensJN in [#170](https://github.com/noonghunna/club-3090/discussions/170).
+
+### ik_llama + IQ4_KS + MTP — `iq4ks-mtp.yml` ⭐
+
+**Workload:** best quality-per-bit GGUF on a single 3090. Same cliff-immunity as llama.cpp (same ggml memory model), but with fork-exclusive IQK imatrix quants that beat mainline Q4_K_M on perplexity.
+
+ubergarm `Qwen3.6-27B-MTP-IQ4_KS.gguf` (IQK imatrix quant, built-in MTP head) + q4_0 KV + `-khad`/`-vhad` (Hadamard K+V cache transforms) + MTP `n=2` + `--merge-qkv` + `--parallel-tool-calls` (ik-exclusive). **262K context** on one 3090. **~62 narr / ~69 code TPS** — ~+18-20% over shipped `llamacpp/mtp` Q4_K_M at equal-or-better quality. Engine: `ghcr.io/ikawrakow/ik-llama-cpp:cu13-server`. See [`docs/engines/IK_LLAMA.md`](engines/IK_LLAMA.md) for the full deep dive.
+
+### ik_llama + IQ4_KS + MTP + vision — `iq4ks-mtp-vision.yml`
+
+Same as above with `--mmproj mmproj-F16.gguf` mounted for multimodal input. 160K context (vision tower trades against KV pool).
+
+### ik_llama + two-stage spec-dec — `iq4ks-two-stage.yml` 🧪
+
+**Workload:** code-heavy agentic workloads where context has repeated patterns (refactoring, test generation, boilerplate).
+
+Chains ngram self-spec (zero VRAM, catches repeated patterns) with MTP as fallback. PR [#1789](https://github.com/ikawrakow/ik_llama.cpp/pull/1789) (merged 2026-05-15, 7 days old). **Experimental** — bench pending. Expected to outperform MTP-only on code workloads; same or slightly worse on purely novel generation. See [`docs/engines/IK_LLAMA.md`](engines/IK_LLAMA.md) "Two-stage spec-dec" section.
 
 ---
 

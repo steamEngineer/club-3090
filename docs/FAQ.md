@@ -43,9 +43,50 @@ vLLM: NVIDIA-only (CUDA). llama.cpp: yes — pick the right Docker image (`ghcr.
 
 ### Does this work on Windows / WSL2?
 
-WSL2: yes, both engines. Make sure GPU passthrough is set up (`nvidia-smi` works inside WSL). Native Windows: vLLM doesn't support it; llama.cpp does — but use a native llama.cpp build, not Docker.
+Yes — both engines work on WSL2. Make sure GPU passthrough is set up (`nvidia-smi` works inside WSL). Native Windows: vLLM doesn't support it; llama.cpp does — but use a native llama.cpp build, not Docker.
 
-Two gotchas to know about up front, both documented in HARDWARE.md alongside the WSL2 section: (1) Windows' default 2-second TDR can kill long kernels mid-flight (WSL2-specific) — see ["extend the TDR delay"](HARDWARE.md#fix--extend-the-tdr-delay-on-the-windows-host); (2) PyTorch's `expandable_segments:True` allocator can crash boot at `gptq_marlin_repack` on some setups (a WSL2 single-card 3090 Ti hit it; JusefPol previously hit it on NVLink dual-3090) — override available via `.env`, see ["disable PyTorch expandable_segments"](HARDWARE.md#fix--disable-pytorch-expandable_segments-if-boot-crashes-at-weight-repack).
+**WSL2 adds ~1.3 GiB of invisible GPU overhead** — the Windows display driver, CUDA runtime, and WDDM reserve VRAM that `nvidia-smi` doesn't report at idle but is locked once a container starts. On a 24 GB card that leaves you with **~22.7 GB usable** instead of 24 GB.
+
+**Dual-card vLLM**: mostly unaffected. Each card runs at ~17 GB with ~7 GB headroom — 1.3 GB overhead is noise.
+
+**Single-card vLLM**: drop a `.env` with `GPU_MEMORY_UTILIZATION=0.94` (default 0.95 assumes headless Linux). Already documented with a combined `.env` template — see [HARDWARE.md WSL2 section](HARDWARE.md#note-for-wsl2--windows-users).
+
+**Single-card llama.cpp / ik_llama**: this is the gap. llama.cpp composes allocate by fixed sizes, not a utilization ratio, so there's no `GPU_MEMORY_UTILIZATION` knob to dial. The shipped defaults are tight for headless Linux:
+
+| Compose | Default ctx | Total VRAM | Headroom on Linux | Headroom on WSL2 | Status |
+|---|---|---|---|---|---|
+| `llamacpp/mtp` | 262K | 22.5 GB | ~1.5 GB | **~0.2 GB** | ❌ will OOM |
+| `llamacpp/mtp` | **131K** | 20.0 GB | ~4.0 GB | **~2.7 GB** | ✅ safe |
+| `llamacpp/mtp-vision` | 160K | 22.3 GB | ~1.7 GB | **~0.4 GB** | ⚠️ marginal |
+| `llamacpp/mtp-vision` | **131K** | ~21 GB | ~3.0 GB | **~1.7 GB** | ✅ safe |
+| `ik-llama/iq4ks-mtp` | 262K | 20.6 GB | ~3.4 GB | **~2.1 GB** | ✅ safe |
+| `ik-llama/iq4ks-mtp-vision` | 160K | ~21 GB | ~3.0 GB | **~1.7 GB** | ✅ safe |
+
+**Fix**: on WSL2, lower the context for the mainline llama.cpp composes:
+
+```sh
+# llamacpp/mtp — drop to 131K for WSL2 headroom
+CTX_SIZE=131072 UBATCH_SIZE=1024 docker compose -f models/qwen3.6-27b/llama-cpp/compose/single/mtp.yml up -d
+
+# llamacpp/mtp-vision — drop to 131K
+CTX_SIZE=131072 UBATCH_SIZE=1024 docker compose -f models/qwen3.6-27b/llama-cpp/compose/single/mtp-vision.yml up -d
+```
+
+The ik_llama composes (IQ4_KS quants are smaller, ~15.1 GB weights) fit at defaults on WSL2.
+
+**Other WSL2 gotchas** (all documented in [HARDWARE.md](HARDWARE.md#note-for-wsl2--windows-users)):
+
+1. **TDR timeout** — Windows force-resets the GPU after 2 seconds of kernel time. Long-context prompts trigger this. Fix: extend TDR to 60s via registry.
+2. **PyTorch `expandable_segments` crash** — `device not ready` at `gptq_marlin_repack` on some WSL2 drivers. Fix: `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False`.
+3. **GDN activation spike** — OOM at ~50-65K tokens on reduced-VRAM rigs. Fix: `VLLM_ENFORCE_EAGER=1` (vLLM only, ~20-30% TPS cost).
+
+Combined `.env` for vLLM single-card WSL2 (drop into `models/qwen3.6-27b/vllm/compose/.env`):
+
+```sh
+GPU_MEMORY_UTILIZATION=0.94
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False,max_split_size_mb:512
+VLLM_ENFORCE_EAGER=1
+```
 
 ---
 
