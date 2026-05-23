@@ -56,6 +56,12 @@
 #                       (default: 3600 — bumped from benchlocal-cli's
 #                       default to avoid mid-batch kills on slower /
 #                       power-capped / single-card rigs).
+#   SAMPLING_FROM_SERVER
+#                       Set to 1 to inherit sampling from the serving config
+#                       instead of the pack's default temp=0. Passed through
+#                       to quality-test.sh --sampling-from-server. Useful when
+#                       the compose encodes the model's recommended sampling
+#                       (e.g. Qwopus temp=0.8). Tags runs as non-canonical.
 #
 
 set -euo pipefail
@@ -268,6 +274,7 @@ URL="$URL" MODEL="$MODEL" \
 
 # --- step 3: quality-test --full --------------------------------------------
 URL="$URL" MODEL="$MODEL" \
+  SAMPLING_FROM_SERVER="${SAMPLING_FROM_SERVER:-0}" \
   run_step quality-full "$OUT_DIR/quality-full.log" \
     bash "$ROOT_DIR/scripts/quality-test.sh" --full --sandbox-log-dir "$OUT_DIR"
 snapshot_quality_json "$OUT_DIR/quality-full.json"
@@ -288,6 +295,7 @@ URL="$URL" MODEL="$MODEL" \
 # Override via env: AIDER_TIMEOUT_PER_CASE=7200 bash scripts/rebench-full.sh
 AIDER_TIMEOUT_PER_CASE="${AIDER_TIMEOUT_PER_CASE:-3600}"
 URL="$URL" MODEL="$MODEL" \
+  SAMPLING_FROM_SERVER="${SAMPLING_FROM_SERVER:-0}" \
   run_step aider-polyglot "$OUT_DIR/aider-polyglot.log" \
     bash "$ROOT_DIR/scripts/quality-test.sh" --pack aider-polyglot-30 \
       --timeout-per-case "$AIDER_TIMEOUT_PER_CASE" --sandbox-log-dir "$OUT_DIR"

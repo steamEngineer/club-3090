@@ -67,6 +67,13 @@ OPTIONS (extra)
                    DIR/sandbox-<pack_id>.log before teardown (forwarded to
                    benchlocal-cli). Without it, sandbox logs are lost on
                    container cleanup. Also settable via SANDBOX_LOG_DIR env.
+  --sampling-from-server
+                   Inherit sampling from the serving config instead of using
+                   the pack's default temp=0. Omits sampling params from
+                   requests so the server applies its own defaults (llama.cpp
+                   --temp, vLLM --override-generation-config). Reads back via
+                   GET /props and records the values. Tags the run as
+                   non-canonical. Also settable via SAMPLING_FROM_SERVER=1 env.
 
 ENV VARS
   URL              Endpoint base URL (default: auto-detected via preflight,
@@ -128,6 +135,7 @@ NO_SANDBOX=0
 SANDBOXED_ONLY=0
 LIST_PACKS=0
 SANDBOX_LOG_DIR="${SANDBOX_LOG_DIR:-}"
+SAMPLING_FROM_SERVER="${SAMPLING_FROM_SERVER:-0}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -179,6 +187,10 @@ while [[ $# -gt 0 ]]; do
         exit 2
       fi
       shift 2
+      ;;
+    --sampling-from-server)
+      SAMPLING_FROM_SERVER=1
+      shift
       ;;
     -h|--help)
       usage
@@ -294,6 +306,10 @@ if [[ -n "$SANDBOX_LOG_DIR" ]]; then
   mkdir -p "$SANDBOX_LOG_DIR"
   CLI_ARGS+=(--sandbox-log-dir "$SANDBOX_LOG_DIR")
   echo "[quality-test] sandbox logs → ${SANDBOX_LOG_DIR}/sandbox-<pack>.log"
+fi
+if [[ "$SAMPLING_FROM_SERVER" == "1" ]]; then
+  CLI_ARGS+=(--sampling-from-server)
+  echo "[quality-test] sampling: inherited from server (non-canonical)"
 fi
 
 # Run; capture exit code so we can also try to emit the compact one-liner
