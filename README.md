@@ -29,8 +29,8 @@ bash scripts/launch.sh
 #    Or skip the wizard:
 #      bash scripts/launch.sh --variant vllm/default      # single-card chat (recommended)
 #      bash scripts/launch.sh --variant vllm/dual         # dual-card 262K + vision
-#      bash scripts/launch.sh --variant llamacpp/default     # single-card MTP, fast + cliff-immune (alias of llamacpp/mtp; 262K via -ub 512)
-#      bash scripts/launch.sh --variant llamacpp/mtp         # single-card 131K + MTP (fast, ~60 code TPS)
+#      bash scripts/launch.sh --variant llamacpp/default     # single-card MTP, fast + cliff-immune (alias of llamacpp/mtp; 200K @ -ub 512)
+#      bash scripts/launch.sh --variant llamacpp/mtp         # single-card 200K + MTP (fast, ~60 code TPS; 131K @ -ub 1024 for faster prefill)
 #      bash scripts/launch.sh --variant llamacpp/mtp-vision  # single-card 49K + MTP + vision
 #    Or partial flags (wizard fills the rest):
 #      bash scripts/launch.sh --model qwen3.6-27b --gpus 0,1
@@ -64,7 +64,7 @@ bash scripts/update.sh
 
 - **Two complementary routes** — pick by what your workload breaks on:
   - 🏎 **vLLM dual** = max throughput. Up to **127 TPS code** (DFlash) or **4 concurrent streams @ 262K** (turbo). Full feature stack (vision · tools · MTP · streaming).
-  - 🛡 **llama.cpp single** = max robustness. Full **262K context** on one 3090. Stress-tested clean: no prefill cliffs, 25K-token tool returns work, 90K needle ladder passes. Slower (~21 TPS) but doesn't crash on real-world tool-using agents.
+  - 🛡 **llama.cpp single** = max robustness. Full **200K context** on one 3090 (max-safe — fills cleanly with margin; see [CLIFFS](docs/CLIFFS.md)). Stress-tested clean: no prefill cliffs, 25K-token tool returns work, 91K needle ladder passes. **~51 / 60 TPS** (Q4_K_M + MTP) — slower than vLLM dual but doesn't crash on real-world tool-using agents.
 - **Validated docker compose configs** for both routes — drop-in OpenAI-compatible API on `localhost:8020`
 - **Multi-engine**: vLLM (full features), llama.cpp (max ctx + robustness), ik_llama (best GGUF quants), SGLang (currently blocked, watch list)
 - **Model-agnostic**: today ships curated configs for Qwen3.6-27B and friends; structure scales as we add models

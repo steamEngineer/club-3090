@@ -17,7 +17,7 @@ Symptoms users report: "performance degrades after ~20 turns", "throughput drops
 | Have | Run | Why it works |
 |---|---|---|
 | 2× 3090 (any topology, NVLink optional) | `bash scripts/switch.sh vllm/dual` | TP=2 splits the failing kernel's working set across both cards. Validated PASS at v2 continuous soak; 111+ TPS p50 decode. |
-| 1× 3090 only | `bash scripts/switch.sh llamacpp/default` | Different engine, different GDN kernel, different memory allocator. Cliff doesn't exist on this path. 262K context, ~21 TPS — slower decode but cliff-immune. |
+| 1× 3090 only | `bash scripts/switch.sh llamacpp/default` | Different engine, different GDN kernel, different memory allocator. Cliff doesn't exist on this path. 200K context, ~51 / 60 TPS (Q4_K_M + MTP) — slower decode but cliff-immune. |
 
 Neither acceptable? Two single-card vLLM mitigations: (a) cap session context at <15K via app-layer rolling summarization, OR (b) accept periodic engine restarts. **Mem-util tuning, MTP-off, and `max-num-batched-tokens` adjustments do not close it** — all tested. The cliff is in `chunk_gated_delta_rule_fwd`'s simultaneous live-tensor set (~500 MiB at T=4128) which doesn't fit alongside accumulated KV + model + workspace on a 24 GB card.
 
@@ -39,10 +39,10 @@ For workloads that **don't** accumulate context across turns (single-shot RAG, s
 | ⛔ ~~**Long ctx, text-only — Balanced MTP** (RAG, codebase, IDE agents)~~ _(vLLM — blocked #167)_ | ~~[`long-text.yml`](../models/qwen3.6-27b/vllm/compose/single/long-text.yml)~~ | ~~180K~~ | ~~50 / 67~~ | ~~22.3 GB~~ |
 | ⛔ ~~**Long ctx, text-only — Max-context** (long single-shot RAG / codebase analysis)~~ _(vLLM — blocked #167)_ | ~~[`long-text-no-mtp.yml`](../models/qwen3.6-27b/vllm/compose/single/long-text-no-mtp.yml)~~ | ~~200K~~ | ~~no MTP~~ | ~~21.0 GB~~ |
 | ⛔ ~~**Bounded thinking** (coding agents, structured-CoT — see [STRUCTURED_COT.md](STRUCTURED_COT.md))~~ _(vLLM — blocked #167)_ | ~~[`bounded-thinking.yml`](../models/qwen3.6-27b/vllm/compose/single/bounded-thinking.yml)~~ | ~~180K~~ | ~~50 / 66~~ | ~~21.7 GB~~ |
-| **Bulletproof, no cliffs** (production service, unpredictable inputs) | [`llamacpp/default`](../models/qwen3.6-27b/llama-cpp/compose/single/mtp.yml) (alias of `llamacpp/mtp`) | **262K** (via `-ub 512`) | 52 / 61 | ~23 GB |
-| **llama.cpp + MTP, fast + long ctx** ⭐ (IDE agents, opencode, Hermes, long-multi-turn agentic) | [`llamacpp/mtp`](../models/qwen3.6-27b/llama-cpp/compose/single/mtp.yml) | **131K** | **51 / 60** | ~22.5 GB |
+| **Bulletproof, no cliffs** (production service, unpredictable inputs) | [`llamacpp/default`](../models/qwen3.6-27b/llama-cpp/compose/single/mtp.yml) (alias of `llamacpp/mtp`) | **200K** (via `-ub 512`) | 52 / 61 | ~23 GB |
+| **llama.cpp + MTP, fast + long ctx** ⭐ (IDE agents, opencode, Hermes, long-multi-turn agentic; `CTX_SIZE=131072 UBATCH_SIZE=1024` for faster prefill) | [`llamacpp/mtp`](../models/qwen3.6-27b/llama-cpp/compose/single/mtp.yml) | **200K** | **51 / 60** | ~22.5 GB |
 | **llama.cpp + MTP + vision** (multimodal chat, screenshot-debugging, vision-aware review) | [`llamacpp/mtp-vision`](../models/qwen3.6-27b/llama-cpp/compose/single/mtp-vision.yml) | **49K** | **57 / 66** | ~20.5 GB |
-| **ik_llama + IQ4_KS + MTP** ⭐ (fastest single-card + leanest VRAM; advanced-quant track) | [`iq4ks-mtp`](../models/qwen3.6-27b/ik-llama/compose/single/iq4ks-mtp.yml) | **262K** | **~60 / ~69** | **~22 GB** (leanest) |
+| **ik_llama + IQ4_KS + MTP** ⭐ (fastest single-card + leanest VRAM; advanced-quant track) | [`iq4ks-mtp`](../models/qwen3.6-27b/ik-llama/compose/single/iq4ks-mtp.yml) | **200K** | **~60 / ~69** | **~22 GB** (leanest) |
 | **ik_llama + IQ4_KS + MTP + vision** | [`iq4ks-mtp-vision`](../models/qwen3.6-27b/ik-llama/compose/single/iq4ks-mtp-vision.yml) | **160K** | TBD | ~21 GB |
 | **ik_llama + two-stage spec-dec** 🧪 (ngram+MTP, code-optimized, experimental) | [`iq4ks-two-stage`](../models/qwen3.6-27b/ik-llama/compose/single/iq4ks-two-stage.yml) | **131K** | TBD | ~22 GB |
 | **Small-context vLLM safe path** ([@stiggy2k16](https://github.com/noonghunna/club-3090/issues/43) data point) — IDE agents capped at <60K accumulated, when you need vLLM speed but llama.cpp is too slow. ⚠️ Genesis-free, but its default pin is purged (#167) — run it with `VLLM_IMAGE=vllm/vllm-openai:latest` until the pin's bumped | [`minimal.yml`](../models/qwen3.6-27b/vllm/compose/single/minimal.yml) at `--gpu-memory-utilization 0.95 --max-model-len 65536` | **64K** | ~32 / ~33 (no MTP) | ~22.4 GB |
@@ -55,7 +55,7 @@ Run via `bash scripts/launch.sh` (interactive) or `bash scripts/switch.sh <varia
 >
 > **Pre-v7.69:** vLLM single-card variants crashed on single prompts >~50K tokens.
 >
-> **Post-v7.69 + vllm#35975 + 0.93 mem-util (Balanced MTP) or MTP-off + 0.95 (Max-context):** **60K single-prompt now passes cleanly** (verified HTTP 200, recall correct, AL=4.00 on Balanced MTP). 90K is past wall-clock-feasible on this hardware. For prompts >60K, use `dual-turbo.yml` (TP=2 splits state) or `llamacpp/default` (262K, different engine).
+> **Post-v7.69 + vllm#35975 + 0.93 mem-util (Balanced MTP) or MTP-off + 0.95 (Max-context):** **60K single-prompt now passes cleanly** (verified HTTP 200, recall correct, AL=4.00 on Balanced MTP). 90K is past wall-clock-feasible on this hardware. For prompts >60K, use `dual-turbo.yml` (TP=2 splits state) or `llamacpp/default` (200K, different engine).
 >
 > The fix combines [vllm#35975](https://github.com/vllm-project/vllm/pull/35975) (skip `inputs_embeds` GPU buffer for text-only models, frees ~444 MiB at boot) with mem-util tuning to free activation headroom for the late-stage 50 MiB allocation that previously fired the cliff.
 >
@@ -118,7 +118,7 @@ For the cross-card TP=2 picture, see [`DUAL_CARD.md`](DUAL_CARD.md).
 
 **Workload:** production service for unpredictable users. Inputs that might be 5K or might be 200K. Tool returns that might be 1K or might be 50K. Anywhere "predictable behavior" beats "peak TPS."
 
-`bash scripts/switch.sh llamacpp/default`. Q3_K_XL (Unsloth dynamic) + q4_0 KV at 262K + vision (mmproj). Different attention library entirely (ggml-cuda, not FA2) → no Cliff 1 mechanism, no Cliff 2 mechanism. Trade is ~21 TPS (~2.5× slower than vLLM). Quant validated by [Benjamin Marie's Kaitchup eval](https://kaitchup.substack.com/p/summary-of-qwen36-gguf-evals-updating).
+`bash scripts/switch.sh llamacpp/default` (alias of `llamacpp/mtp`, collapsed 2026-05-22). Q4_K_M MTP GGUF (`unsloth/Qwen3.6-27B-MTP-GGUF`) + q4_0 KV + MTP `n=2` at **200K** (max-safe — fills cleanly with ~1.1 GB margin; 262K *boots* but walls ~125K, see [`docs/CLIFFS.md`](CLIFFS.md)). No vision — use `llamacpp/mtp-vision` for multimodal. Different attention library entirely (ggml-cuda, not FA2) → no Cliff 1 mechanism, no Cliff 2 mechanism. **~52 / 61 TPS** — slower than vLLM dual but cliff-immune. Quant family validated by [Benjamin Marie's Kaitchup eval](https://kaitchup.substack.com/p/summary-of-qwen36-gguf-evals-updating).
 
 ### llama.cpp + MTP, fast + long ctx — `llamacpp/mtp` ⭐
 
@@ -142,7 +142,7 @@ For the cross-card TP=2 picture, see [`DUAL_CARD.md`](DUAL_CARD.md).
 
 **Workload:** best quality-per-bit GGUF on a single 3090. Same cliff-immunity as llama.cpp (same ggml memory model), but with fork-exclusive IQK imatrix quants that beat mainline Q4_K_M on perplexity.
 
-ubergarm `Qwen3.6-27B-MTP-IQ4_KS.gguf` (IQK imatrix quant, built-in MTP head) + q4_0 KV + `-khad`/`-vhad` (Hadamard K+V cache transforms) + MTP `n=2` + `--merge-qkv` + `--parallel-tool-calls` (ik-exclusive). **262K context** on one 3090. At matched 370 W it's **~18–20% faster than `llamacpp/mtp`** on TPS (~60 narr / ~69 code vs ~50 / ~58), quality-tied (8-pack 103 vs 102), and **~0.5–0.8 GB leaner** — the faster *and* leaner single-card path. (A 2026-05-22 "tie" was a wrong-engine measurement artifact — corrected 2026-05-23 via a power-cap-controlled A/B, [#184](https://github.com/noonghunna/club-3090/discussions/184).) Engine: `ghcr.io/ikawrakow/ik-llama-cpp:cu13-server`. See [`docs/engines/IK_LLAMA.md`](engines/IK_LLAMA.md) for the full deep dive.
+ubergarm `Qwen3.6-27B-MTP-IQ4_KS.gguf` (IQK imatrix quant, built-in MTP head) + q4_0 KV + `-khad`/`-vhad` (Hadamard K+V cache transforms) + MTP `n=2` + `--merge-qkv` + `--parallel-tool-calls` (ik-exclusive). **200K context** (max-safe default; native max 262K) on one 3090. At matched 370 W it's **~18–20% faster than `llamacpp/mtp`** on TPS (~60 narr / ~69 code vs ~50 / ~58), quality-tied (8-pack 103 vs 102), and **~0.5–0.8 GB leaner** — the faster *and* leaner single-card path. (A 2026-05-22 "tie" was a wrong-engine measurement artifact — corrected 2026-05-23 via a power-cap-controlled A/B, [#184](https://github.com/noonghunna/club-3090/discussions/184).) Engine: `ghcr.io/ikawrakow/ik-llama-cpp:cu13-server`. See [`docs/engines/IK_LLAMA.md`](engines/IK_LLAMA.md) for the full deep dive.
 
 ### ik_llama + IQ4_KS + MTP + vision — `iq4ks-mtp-vision.yml`
 
@@ -208,7 +208,7 @@ Track in [`docs/UPSTREAM.md`](UPSTREAM.md#luce-dflash-luce-orglucebox-hub).
 |---|---|---|
 | 4 concurrent streams at 262K + vision | KV pool too small for 4 × full ctx | TP=2 (see DUAL_CARD.md) |
 | Peak code TPS (>100 TPS on quicksort prompt) | DFlash N=5 needs head_size=256 + non-causal — vLLM head-dim split | TP=2 + DFlash |
-| Single-prompt >60K tokens on vLLM | Cliff 2 (DeltaNet GDN forward), no fix yet | TP=2 OR llama.cpp 262K (different engine) |
+| Single-prompt >60K tokens on vLLM | Cliff 2 (DeltaNet GDN forward), no fix yet | TP=2 OR llama.cpp 200K (different engine) |
 
 ---
 
@@ -217,7 +217,7 @@ Track in [`docs/UPSTREAM.md`](UPSTREAM.md#luce-dflash-luce-orglucebox-hub).
 ### Prefill cliffs
 
 - **Cliff 1** — FFN intermediate-buffer activation peak (138 MiB allocate at `intermediate_size × max-num-batched-tokens`). Historically fired on long-ctx composes at >0.95 mem-util when prefill batch needed the buffer. **Closed on `tools-text.yml`** (FP8 KV path) since 2026-04-29 via Genesis PN8. **Closed on TQ3 paths** on v0.20 + Genesis v7.65+ since 2026-05-01 via PN12 + PN17 + P38B in-source hooks. **Mech B closed** 2026-05-02 (v7.66 + PN25 v3 + PN30 dst-shaped) — see [`docs/CLIFFS.md`](CLIFFS.md).
-- **Cliff 2** — DeltaNet GDN forward OOM. **Closed at 60K single-prompt** as of 2026-05-02 PM via Genesis v7.69 (PN32 GDN chunked-prefill + P103 worker self-install) plus a local backport of vllm#35975 (skip text-only `inputs_embeds` GPU buffer, ~444 MiB freed). Two shippable variants: `long-text.yml` (Balanced MTP, 180K + 0.93) and `long-text-no-mtp.yml` (Max-context, 200K + 0.95). >60K still hits the 24 GB hardware-physical wall — for those prompts use dual-card TP=2 (verified 237K) or llama.cpp single-card (262K, different engine).
+- **Cliff 2** — DeltaNet GDN forward OOM. **Closed at 60K single-prompt** as of 2026-05-02 PM via Genesis v7.69 (PN32 GDN chunked-prefill + P103 worker self-install) plus a local backport of vllm#35975 (skip text-only `inputs_embeds` GPU buffer, ~444 MiB freed). Two shippable variants: `long-text.yml` (Balanced MTP, 180K + 0.93) and `long-text-no-mtp.yml` (Max-context, 200K + 0.95). >60K still hits the 24 GB hardware-physical wall — for those prompts use dual-card TP=2 (verified 237K) or llama.cpp single-card (200K, different engine).
 
 ### VRAM peak vs idle
 

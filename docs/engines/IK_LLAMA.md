@@ -92,8 +92,8 @@ MODEL_DIR=$MODEL_DIR docker compose \
 MODEL_DIR=$MODEL_DIR docker compose \
   -f models/qwen3.6-27b/ik-llama/compose/single/iq4ks-two-stage.yml up -d
 ```
-Defaults: q4_0 KV, 262K ctx (MTP) / 131K ctx (two-stage), MTP n=2, native template, thinking-off. Overrides:
-- **Max context (262K):** `UBATCH_SIZE=512 CTX_SIZE=262144` (q4_0 KV is the default; ~21.5 GB / 24).
+Defaults: q4_0 KV, 200K ctx (MTP) / 131K ctx (two-stage), MTP n=2, native template, thinking-off. Overrides:
+- **Max context:** **200K** is the max-safe default (fills cleanly with ~1.1 GB margin). 262144 is the model's native max but *boots ≠ fills* — `UBATCH_SIZE=512 CTX_SIZE=262144` boots but crosses the agent-safety margin at high fill, so 200K is the recommended ceiling (see [`docs/CLIFFS.md`](../CLIFFS.md)).
 - **Higher KV fidelity:** `KV_TYPE=q8_0` (caps ~131-200K — q8_0 KV @262K OOMs).
 - **Reasoning on:** `REASONING=on` (pair with `MTP_DRAFT_N_MAX=5 DRAFT_P_MIN=0.5` — reasoning text drafts deeper).
 
