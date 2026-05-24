@@ -8,6 +8,8 @@ If you have one or two RTX 3090s and want to run modern LLMs at home, in a homel
 
 ## Quick start
 
+> 🪟 **On Windows?** These steps assume Linux/macOS. Set up **WSL2** first → **[docs/WSL_SETUP.md](docs/WSL_SETUP.md)** (start-to-finish). Native Windows runs only the *upstream* llama.cpp binary — none of this repo's tooling.
+
 ```bash
 # 1. Clone the repo
 git clone https://github.com/noonghunna/club-3090.git
