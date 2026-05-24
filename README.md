@@ -27,12 +27,10 @@ bash scripts/setup.sh
 # 3. Pick a config + boot it (interactive wizard: asks model → GPUs → projects VRAM budget)
 bash scripts/launch.sh
 #    Or skip the wizard:
-#      bash scripts/launch.sh --variant vllm/default      # single-card chat (recommended)
-#      bash scripts/launch.sh --variant vllm/dual         # dual-card 262K + vision
-#      bash scripts/launch.sh --variant llamacpp/default     # single-card MTP, fast + cliff-immune (alias of llamacpp/mtp; 200K @ -ub 512)
-#      bash scripts/launch.sh --variant llamacpp/mtp         # single-card 200K + MTP (fast, ~60 code TPS; 131K @ -ub 1024 for faster prefill)
-#      bash scripts/launch.sh --variant llamacpp/mtp-vision  # single-card 49K + MTP + vision
-#      bash scripts/launch.sh --variant ik-llama/iq4ks-mtp   # single-card FASTEST — ~60/69 TPS, leanest VRAM (ik_llama IQK quant)
+#      bash scripts/launch.sh --variant llamacpp/default    # single-card chat (recommended) — cliff-immune, 200K @ -ub 512, ~51/60 TPS
+#      bash scripts/launch.sh --variant ik-llama/iq4ks-mtp  # single-card FASTEST — ~60/69 TPS, leanest VRAM (ik_llama IQK quant)
+#      bash scripts/launch.sh --variant llamacpp/mtp-vision # single-card 49K + MTP + vision
+#      bash scripts/launch.sh --variant vllm/dual           # dual-card 262K + vision (vLLM single-card paths blocked on #167)
 #    Or partial flags (wizard fills the rest):
 #      bash scripts/launch.sh --model qwen3.6-27b --gpus 0,1
 #      bash scripts/launch.sh --tp 2 --pp 1               # override vLLM parallelism
