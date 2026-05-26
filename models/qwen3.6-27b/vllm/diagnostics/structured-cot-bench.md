@@ -21,7 +21,7 @@ On a single RTX 3090 running Qwen3.6-27B AutoRound INT4 dense via vLLM long-text
 - **Genesis patches:** P4 hybrid TQ + PN12 anchor sidecar + P104 FA clamp + P101/P103 TurboQuant + tolist cudagraph guard (per `single/long-text.yml`)
 - **KV cache:** TurboQuant 3-bit (`turboquant_3bit_nc`)
 - **Spec-decode:** MTP n=3 (Lorbus draft head)
-- **Compose:** `models/qwen3.6-27b/vllm/compose/single/long-text.yml`
+- **Compose:** `models/qwen3.6-27b/vllm/compose/single/autoround-int4/long-text.yml`
 - **Required override (currently uncommitted):** `--structured-outputs-config.enable_in_reasoning true`
 - **Endpoint:** `http://localhost:8020/v1` (single card), `http://localhost:8021/v1` (parallel GPU 1 used for LCB run)
 - **vLLM serve args (full command line from compose):**

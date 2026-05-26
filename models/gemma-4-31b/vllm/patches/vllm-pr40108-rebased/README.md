@@ -34,7 +34,7 @@ ValueError: Selected backend AttentionBackendEnum.TURBOQUANT is not valid
             for this configuration. Reason: ['kv_cache_dtype not supported']
 ```
 
-This blocks the TQ3 head-to-head against `qwen3.6-27b/vllm/compose/dual/int8-tq3.yml`.
+This blocks the TQ3 head-to-head against `gemma-4-31b/vllm/compose/dual/autoround-int4/int8-tq3.yml`.
 
 ## Conflict with PR #40391 overlay
 

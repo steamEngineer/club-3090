@@ -194,15 +194,15 @@ bash scripts/switch.sh --force llamacpp/default
 
 # single-card llama.cpp (recommended default) — serves on :8020
 MODEL_DIR=/path/to/models docker compose \
-  -f models/qwen3.6-27b/llama-cpp/compose/single/mtp.yml up -d
+  -f models/qwen3.6-27b/llama-cpp/compose/single/unsloth-q4km/mtp.yml up -d
 
 # single-card ik_llama (fastest single-card path) — :8020
 MODEL_DIR=/path/to/models docker compose \
-  -f models/qwen3.6-27b/ik-llama/compose/single/iq4ks-mtp.yml up -d
+  -f models/qwen3.6-27b/ik-llama/compose/single/ubergarm-iq4ks/mtp.yml up -d
 
 # dual-card vLLM — :8010
 MODEL_DIR=/path/to/models docker compose \
-  -f models/qwen3.6-27b/vllm/compose/dual/docker-compose.yml up -d
+  -f models/qwen3.6-27b/vllm/compose/dual/autoround-int4/fp8-mtp.yml up -d
 
 # verify it's serving (use the port from the comment above), then stop it the same way:
 curl -s http://localhost:8020/v1/models | jq .

@@ -118,24 +118,24 @@ def infer_compose_path(container_name: str, served: str, tp: str) -> str:
         "dual-tq3-mtp": "dual/tq3-mtp.yml",
         "dual-int8": "dual/int8.yml",
         "dual-bf16": "dual/bf16.yml",
-        "dual-dflash-noviz": "dual/dflash-noviz.yml",
-        "dual-dflash": "dual/dflash.yml",
-        "dual-turbo": "dual/turbo.yml",
-        "dual": "dual/docker-compose.yml",
-        "minimal": "single/minimal.yml",
-        "tools-text": "single/tools-text.yml",
-        "long-text-no-mtp": "single/long-text-no-mtp.yml",
-        "long-text": "single/long-text.yml",
-        "long-vision": "single/long-vision.yml",
+        "dual-dflash-noviz": "dual/autoround-int4/dflash-noviz.yml",
+        "dual-dflash": "dual/autoround-int4/dflash.yml",
+        "dual-turbo": "dual/autoround-int4/turbo.yml",
+        "dual": "dual/autoround-int4/fp8-mtp.yml",
+        "minimal": "single/autoround-int4/minimal.yml",
+        "tools-text": "single/autoround-int4/tools-text.yml",
+        "long-text-no-mtp": "single/autoround-int4/long-text-no-mtp.yml",
+        "long-text": "single/autoround-int4/long-text.yml",
+        "long-vision": "single/autoround-int4/long-vision.yml",
     }
     for needle, suffix in mapping.items():
         if needle in name:
             return f"{model_root}/{suffix}"
     if tp == "4":
-        return "models/qwen3.6-27b/vllm/compose/multi4/docker-compose.yml"
+        return "models/qwen3.6-27b/vllm/compose/multi4/autoround-int4/fp8-mtp.yml"
     if tp == "2":
-        return f"{model_root}/dual/docker-compose.yml"
-    return f"{model_root}/single/docker-compose.yml"
+        return f"{model_root}/dual/autoround-int4/fp8-mtp.yml"
+    return f"{model_root}/single/autoround-int4/tq3-mtp.yml"
 
 
 def compose_display(compose_path: str, served: str) -> str:

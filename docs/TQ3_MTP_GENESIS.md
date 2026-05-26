@@ -138,7 +138,7 @@ bash scripts/setup.sh
 
 # 2. Bring up the Genesis-backed TQ3+MTP compose (pin-downgraded to Genesis v7.72.2 known-good)
 MODEL_DIR=/path/to/huggingface docker compose \
-  -f models/qwen3.6-27b/vllm/compose/dual/tq3-mtp-genesis.yml up -d
+  -f models/qwen3.6-27b/vllm/compose/dual/autoround-int4/tq3-mtp-genesis.yml up -d
 
 # 3. Run the full 5-phase rebench (~1.75-2 hr)
 URL=http://localhost:8015 TAG=my-tq3-mtp-genesis bash scripts/rebench-full.sh

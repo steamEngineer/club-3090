@@ -80,7 +80,7 @@ So ~10% TPS hit (56.5 → 50.9 narr) buys ~4× more context (49K → 192K). For 
 
 | Config | Quant | KV | Ctx | Vision | Narr TPS | Code TPS | Notes |
 |---|---|---|---|---|---|---|---|
-| docker-compose.yml | UD-Q3_K_XL | q4_0 | 262K | ✅ | 21 | 21 | Flat across context depth — same TPS at 65K and 262K |
+| unsloth-q4km/mtp.yml | UD-Q3_K_XL | q4_0 | 262K | ✅ | 21 | 21 | Flat across context depth — same TPS at 65K and 262K |
 | `+ --spec-type ngram-mod` | Q4_K_M | q8_0 | 32K | ❌ | 22 | **26** | +25% on code via draftless n-gram spec-decode |
 
 The Q3_K_XL number at 262K is **lower than community-reported 35-45 tok/s** ([Reddit](https://www.reddit.com/r/LocalLLaMA/comments/1sx8uok/) + earlier 2026-04-23 measurements showing 28.5 TPS on Q4_K_M). We're investigating whether mainline llama.cpp regressed between commits `9ab47e7d8` (2026-04-23) and `0d0764dfd` (current). For absolute speed today, **vLLM patched is ~2.5× faster** on the same hardware (51-55 narr / 67-70 code) — see [BENCHMARKS](../../../BENCHMARKS.md). llama.cpp's value proposition here is **simplicity + max context + multi-platform**, not throughput.
@@ -98,12 +98,12 @@ hf download unsloth/Qwen3.6-27B-MTP-GGUF Qwen3.6-27B-Q4_K_M.gguf \
 
 # 2. Launch via Docker compose (recommended)
 cd <repo>/models/qwen3.6-27b/llama-cpp/compose
-MODEL_DIR=$MODEL_DIR docker compose -f single/mtp.yml up -d
+MODEL_DIR=$MODEL_DIR docker compose -f single/unsloth-q4km/mtp.yml up -d
 curl http://localhost:8020/v1/models
 ```
 
 For host-built llama.cpp (AMD/Intel/Apple Silicon without Docker), use the
-same flags from `compose/single/mtp.yml` adapted to your binary. Key flags:
+same flags from `compose/single/unsloth-q4km/mtp.yml` adapted to your binary. Key flags:
 `-ngl 99 -fa on -c 262144 -ub 512 --cache-type-k q4_0 --cache-type-v q4_0
 --spec-type draft-mtp --spec-draft-n-max 2 --jinja --reasoning off`.
 

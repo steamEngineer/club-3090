@@ -22,8 +22,8 @@ The artifacts in this tree document the SGLang state for the next person who com
 
 | Variant | Path | Status |
 |---|---|---|
-| Dual 3090 (TP=2) EAGLE-3 + AutoRound INT4 | [`compose/dual/eagle3-experimental.yml`](compose/dual/eagle3-experimental.yml) | ⚠ PARKED — boots + coherent output validated, but ~15-18 TPS with `--disable-cuda-graph` workaround vs ~85 TPS on `vllm/dual/turbo.yml` |
-| Single 3090 EAGLE-3 + AutoRound INT4 | [`compose/single/eagle3-experimental.yml`](compose/single/eagle3-experimental.yml) | ❌ PARKED — blocked on SGLang OffloaderV1 tied-weights bug; never reached first forward pass |
+| Dual 3090 (TP=2) EAGLE-3 + AutoRound INT4 | [`compose/dual/autoround-int4/eagle3-experimental.yml`](compose/dual/autoround-int4/eagle3-experimental.yml) | ⚠ PARKED — boots + coherent output validated, but ~15-18 TPS with `--disable-cuda-graph` workaround vs ~85 TPS on `vllm/dual/turbo.yml` |
+| Single 3090 EAGLE-3 + AutoRound INT4 | [`compose/single/autoround-int4/eagle3-experimental.yml`](compose/single/autoround-int4/eagle3-experimental.yml) | ❌ PARKED — blocked on SGLang OffloaderV1 tied-weights bug; never reached first forward pass |
 | Other quants (FenomAI AWQ-INT4, INT8 PTH) | TARGET_DIR override in dual YAML | ⚠ PARKED — untested, would inherit the same EAGLE-3 < MTP structural disadvantage |
 
 ---
@@ -61,7 +61,7 @@ curl -s http://localhost:8041/v1/chat/completions \
 
 ## Why dual, not single
 
-We have a single-card compose ([`compose/single/eagle3-experimental.yml`](compose/single/eagle3-experimental.yml)) that progresses through every layer of the boot but **fails at first forward pass** because the only knob that fits everything in 24 GB is `--cpu-offload-gb`, and SGLang's OffloaderV1 hits a tied-weights bug on Qwen3-Next:
+We have a single-card compose ([`compose/single/autoround-int4/eagle3-experimental.yml`](compose/single/autoround-int4/eagle3-experimental.yml)) that progresses through every layer of the boot but **fails at first forward pass** because the only knob that fits everything in 24 GB is `--cpu-offload-gb`, and SGLang's OffloaderV1 hits a tied-weights bug on Qwen3-Next:
 
 ```
 ValueError: functional_call got multiple values for keys

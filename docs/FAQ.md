@@ -68,10 +68,10 @@ Yes — both engines work on WSL2. Make sure GPU passthrough is set up (`nvidia-
 
 ```sh
 # llamacpp/mtp — drop to 131K for WSL2 headroom
-CTX_SIZE=131072 UBATCH_SIZE=1024 docker compose -f models/qwen3.6-27b/llama-cpp/compose/single/mtp.yml up -d
+CTX_SIZE=131072 UBATCH_SIZE=1024 docker compose -f models/qwen3.6-27b/llama-cpp/compose/single/unsloth-q4km/mtp.yml up -d
 
 # llamacpp/mtp-vision — drop to 131K
-CTX_SIZE=131072 UBATCH_SIZE=1024 docker compose -f models/qwen3.6-27b/llama-cpp/compose/single/mtp-vision.yml up -d
+CTX_SIZE=131072 UBATCH_SIZE=1024 docker compose -f models/qwen3.6-27b/llama-cpp/compose/single/unsloth-q4km/mtp-vision.yml up -d
 ```
 
 The ik_llama composes (IQ4_KS quants are smaller, ~15.1 GB weights) fit at defaults on WSL2.
