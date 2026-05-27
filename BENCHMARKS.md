@@ -283,6 +283,15 @@ None close the **-13% narr / -11% code gap to 3dluvr's anchor**. Remaining gap l
 | `dual.yml`-shape forced TP=1 | @apnar (1× **RTX 5090** 32 GB, air-cooled, 600 W) | bf16 | 32K | **159.67 / 215.10** (decode 160.71 / 217.30) | 27.5 GB | 2026-05-07 | **First single-5090 Gemma 4 MTP data point.** First non-OOM single-card Gemma 4 result on the matrix — the 32 GB Blackwell envelope clears the 24 GB Ampere boot OOM. CV 1.9%/1.8%, peak 426 W. **+46% narr / +51% code over @noonghunna's 2× 3090 TP=2 baseline (109/142)** — single-card 5090 beats dual-3090 on Gemma 4. [Disc #67](https://github.com/noonghunna/club-3090/discussions/67#discussioncomment-16832042). |
 | `dual-dflash.yml`-shape forced TP=1 (mem-util 0.96, max-model-len 12000) | @apnar (1× **RTX 5090** 32 GB, air-cooled, 600 W) | bf16 | **12K** | **150.40 / 261.06** (decode 151.16 / 264.62) | 28.8 GB | 2026-05-07 | **First single-5090 Gemma 4 DFlash data point.** Trade vs MTP row above: ~6% narr loss, **+21% code lift** (215→261). 1st-warmup TTFT outlier (73 s) suggests cudagraph warmup taking longer on first request; subsequent warmups stable at <40 ms. CV 3.6%/2.8%, peak 440 W. **Required mem-util 0.96 + max-model-len 12K** to fit BF16 weights + DFlash N=5 drafter on 32 GB — DFlash drafter footprint pushes out ctx ceiling vs MTP's 32K. [Disc #67](https://github.com/noonghunna/club-3090/discussions/67#discussioncomment-16832042). |
 
+### Single-card (1× 3090) — llama.cpp (no vLLM)
+
+Two single-3090 llama.cpp paths, measured 2026-05-27 (`bench.sh`, n=5; full writeup [discussion #239](https://github.com/noonghunna/club-3090/discussions/239)). Both: `gemma-4-31B-it` Q4_K_S + `q5_0`/`q4_1` KV; SWA-windowed KV scales context to ~131–200K. Neither is a shipped compose (mainline = from-source build, beellama = community fork) → community-experimental.
+
+| Config | Rig | KV | Bench ctx | Narr / Code TPS | PP tok/s | DFlash accept | 8-pack (think off / on) | Peak VRAM | Date | Notes |
+| --- | --- | --- | ---: | ---: | ---: | --- | --- | ---: | --- | --- |
+| **mainline llama.cpp + `FA_ALL_QUANTS`** (no spec-dec) | @noonghunna (1× 3090) | q5_0/q4_1 | 65K | **36.8 / 36.8** | ~277 | — | **109/150** / — | 19.2 GB | 2026-05-27 | **The no-fork supported path.** Built from source with `-DGGML_CUDA_FA_ALL_QUANTS=ON` — the head_dim=512 quant-KV FA kernel the stock `ggml-org/llama.cpp` image omits (→ ~12 TPS otherwise). CV 0.1%, TTFT 0.3 s. |
+| **beellama.cpp + DFlash** (IQ4_XS drafter) | @noonghunna (1× 3090) | q5_0/q4_1 | 100K | **47 / 88** | ~855 | ~20–80% (workload) | 109/150 / **114/150** | 21.8 GB | 2026-05-27 | DFlash external drafter — **1.28× narr / 2.40× code** over mainline; TTFT ~0.1 s. TPS thinking-neutral (47/88 both modes). Thinking-ON nets **+5** on the 8-pack (agentic gains; reasonmath −1 noise). Community/experimental (deep fork chain, no prebuilt Docker). CV 3–6%. |
+
 
 ---
 
