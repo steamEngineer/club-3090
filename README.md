@@ -4,6 +4,8 @@
 
 If you have one or two RTX 3090s and want to run modern LLMs at home, in a homelab, or as a dev backend — this repo collects the working configs, patches, and benchmarks.
 
+> 🎯 **4090 or 5090 owner?** The composes run cross-rig — contributors have benched both with measured numbers: **[Can I use a 4090? →](docs/FAQ.md#can-i-use-a-4090-instead-of-a-3090)** · **[Can I use a 5090? →](docs/FAQ.md#can-i-use-a-5090)**. The tooling is calibrated for 3090s but the configs are class-aware; per-class gotchas (4090's tighter idle VRAM, 5090's 32 GB envelope) + cross-rig benchmark rows live in the FAQ.
+
 ---
 
 ## Quick start
