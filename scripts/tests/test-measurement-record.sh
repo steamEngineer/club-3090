@@ -20,6 +20,11 @@ set -euo pipefail
 #   (g) corpus path is under the gitignored results/ subtree and filename
 #       carries the conditions-fingerprint short hash; write+append works;
 #   (h) an unknown tag fails loud (KeyError), never a silent garbage record.
+#   (i) a MEASURED record built from bench output MISSING the decode summary
+#       fails loud (MeasuredRecordError), never a hollow null-TPS record;
+#   (j) a MEASURED record with a malformed/absent GPU-state line surfaces a
+#       parse_warnings entry (not a silent null), without raising;
+#   (k) regression: the complete well-formed sample yields EMPTY parse_warnings.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
@@ -136,6 +141,10 @@ fp = ext["conditions_fingerprint"]
 check(fp["power_cap_w"] == 370.00, f"(e) fingerprint power_cap_w: {fp['power_cap_w']}")
 check(fp["kv_dtype"] == "q4_0" and fp["topology"] == "single", "(e) fingerprint kv/topology")
 
+# (k) regression: complete, well-formed sample => clean record, NO warnings
+check("parse_warnings" in rec, "(k) parse_warnings field missing")
+check(rec["parse_warnings"] == [], f"(k) happy path has warnings: {rec['parse_warnings']}")
+
 # explicit power_cap_w arg must win over parsed value
 rec2 = mr.build_record(tag="ik-llama/iq4ks-mtp", bench_metrics=metrics,
                        hardware="rtx-3090", power_cap_w=230.0)
@@ -166,6 +175,69 @@ try:
     failures.append("(h) unknown tag did NOT raise")
 except KeyError:
     pass
+
+# (i) MEASURED record + bench output missing the decode summary => fail loud.
+# Strip the summary block from the sample (keep the GPU-state line) so only the
+# decode metric is gone; the parser must report zero decode-summary blocks and
+# build_record must refuse rather than write null TPS.
+no_summary = "\n".join(
+    ln for ln in sample.splitlines()
+    if "decode_TPS" not in ln and "wall_TPS" not in ln and "=== summary" not in ln
+)
+m_nosum = mr.parse_bench_output(no_summary)
+check(m_nosum.decode_tps is None, f"(i) precondition decode_tps gone: {m_nosum.decode_tps}")
+check(m_nosum.decode_summary_blocks == 0, f"(i) precondition summary blocks: {m_nosum.decode_summary_blocks}")
+try:
+    mr.build_record(tag="ik-llama/iq4ks-mtp", bench_metrics=m_nosum,
+                    hardware="rtx-3090", result_class="boot-fit-measured")
+    failures.append("(i) measured record w/ no decode summary did NOT raise")
+except mr.MeasuredRecordError:
+    pass
+
+# A NON-measured result_class with the same missing-decode input must NOT raise
+# (the requirement is scoped to measured records only).
+try:
+    rec_pred = mr.build_record(tag="ik-llama/iq4ks-mtp", bench_metrics=m_nosum,
+                               hardware="rtx-3090", result_class="boot-fit-predicted")
+    check(rec_pred["measured_extensions"]["decode_tps_by_ctx"] == {},
+          "(i) predicted record ladder should be empty, not fabricated")
+except mr.MeasuredRecordError:
+    failures.append("(i) non-measured result_class wrongly raised on missing decode")
+
+# (j) MEASURED record + malformed GPU-state line => parse_warnings, NOT raise.
+# Keep the decode summary; corrupt the GPU-state row so no VRAM MiB matches.
+bad_gpu = """\
+=== summary [narrative] (n=1) ===
+  wall_TPS       mean= 238.10   std=  0.00
+  decode_TPS     mean= 245.10   std=  0.00
+  TTFT          mean=   120ms  std=    0ms
+=== GPU state ===
+<nvidia-smi unavailable: query failed>
+"""
+m_badgpu = mr.parse_bench_output(bad_gpu)
+check(m_badgpu.decode_tps == 245.10, f"(j) precondition decode parsed: {m_badgpu.decode_tps}")
+check(m_badgpu.gpu_state_section_present, "(j) precondition GPU section present")
+check(m_badgpu.gpu_state_unparsed, "(j) precondition GPU section flagged unparsed")
+check(m_badgpu.vram_used_mib == {}, f"(j) precondition no VRAM rows: {m_badgpu.vram_used_mib}")
+rec_badgpu = mr.build_record(tag="ik-llama/iq4ks-mtp", bench_metrics=m_badgpu,
+                             hardware="rtx-3090", result_class="boot-fit-measured")
+check(len(rec_badgpu["parse_warnings"]) >= 1, "(j) no parse_warnings surfaced for bad GPU line")
+check(any("GPU-state" in w for w in rec_badgpu["parse_warnings"]),
+      f"(j) GPU-state warning not named: {rec_badgpu['parse_warnings']}")
+# record is still WRITTEN (soft gap), and the measured TPS is intact
+check(rec_badgpu["measured_extensions"]["decode_tps_by_ctx"] == {"canonical-short": 245.10},
+      "(j) decode TPS lost despite only GPU line being bad")
+check(rec_badgpu["measured_extensions"]["peak_vram_mib_by_gpu"] == {},
+      "(j) VRAM should be empty, not fabricated")
+
+# An absent GPU-state section also warns (distinct message), still no raise.
+no_gpu = "\n".join(ln for ln in bad_gpu.splitlines() if "GPU state" not in ln and "nvidia-smi" not in ln)
+m_nogpu = mr.parse_bench_output(no_gpu)
+check(not m_nogpu.gpu_state_section_present, "(j) precondition no GPU section")
+rec_nogpu = mr.build_record(tag="ik-llama/iq4ks-mtp", bench_metrics=m_nogpu,
+                            hardware="rtx-3090", result_class="boot-fit-measured")
+check(any("GPU state" in w for w in rec_nogpu["parse_warnings"]),
+      f"(j) absent-GPU-section warning not surfaced: {rec_nogpu['parse_warnings']}")
 
 if failures:
     print("FAIL test-measurement-record:")

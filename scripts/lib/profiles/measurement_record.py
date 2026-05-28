@@ -88,6 +88,33 @@ CORPUS_SUBDIR = "results/measurement-records"
 NOT_RUN = "not-run"
 
 
+class MeasuredRecordError(ValueError):
+    """A measured record is missing data it MUST carry to be trustworthy.
+
+    Raised (fail-loud) when ``result_class`` says a record is *measured* but the
+    parse produced no decode TPS (or no parseable bench summary block at all).
+    A measured record with null TPS is worse than no record — it looks like real
+    calibration data while carrying none — so the producer refuses to write it.
+    This mirrors the module's existing fail-loud posture for an unknown registry
+    tag (``KeyError``). Soft gaps (e.g. a malformed GPU-state line) are surfaced
+    as ``parse_warnings`` instead, not raised.
+    """
+
+
+def _is_measured_result_class(result_class: Optional[str]) -> bool:
+    """True if ``result_class`` denotes a MEASURED record.
+
+    The frozen 3-state runtime contract uses ``boot-fit predicted|measured`` and
+    the producer's default is ``boot-fit-measured``. We treat any class whose
+    final ``-``-delimited token is ``measured`` (e.g. ``boot-fit-measured``) as
+    measured. ``predicted`` / ``unknown`` / ``*-derived`` classes are NOT
+    measured and impose no decode-TPS requirement.
+    """
+    if not result_class:
+        return False
+    return result_class.strip().lower().split("-")[-1] == "measured"
+
+
 # --------------------------------------------------------------------------- #
 # arch / arch_class derivation
 # --------------------------------------------------------------------------- #
@@ -146,7 +173,11 @@ class BenchMetrics:
     """Parsed numbers from one ``scripts/bench.sh`` stdout capture.
 
     All fields optional — a partial bench (e.g. ``ONLY=code``, or no GPU line)
-    still yields a usable record. The producer never fabricates absent numbers.
+    still yields a usable :class:`BenchMetrics`. The producer never fabricates
+    absent numbers. Whether an absent number is *tolerable* is decided later in
+    :func:`build_record`: for a MEASURED ``result_class`` a missing decode TPS
+    is fatal (fail-loud), while a missing GPU line is a soft warning. The parse
+    provenance fields below let ``build_record`` tell those cases apart.
     """
 
     decode_tps: Optional[float] = None      # mean decode_TPS (model decode rate)
@@ -159,6 +190,18 @@ class BenchMetrics:
     power_cap_w: Optional[float] = None
     # Power draw in watts, per GPU index, if present.
     power_draw_w: dict[int, float] = field(default_factory=dict)
+
+    # --- Parse provenance (drift / hollow-record detection) ----------------- #
+    # How many ``=== summary [...] ===`` blocks carrying a ``decode_TPS mean=``
+    # line we matched. Zero on a measured record means bench-output drift (the
+    # summary section the producer keys off is absent or unparseable) -> the
+    # record must NOT be written with null TPS. See ``build_record``.
+    decode_summary_blocks: int = 0
+    # ``=== GPU state ===`` marker seen at all (regardless of parseability).
+    gpu_state_section_present: bool = False
+    # A ``=== GPU state ===`` section was present but yielded no usable
+    # per-GPU VRAM row -> malformed GPU-state line (soft gap -> warn, not raise).
+    gpu_state_unparsed: bool = False
 
 
 def _f(s: str) -> Optional[float]:
@@ -193,6 +236,12 @@ def parse_bench_output(text: str) -> BenchMetrics:
         matches = re.findall(rf"^\s*{label}\s+mean=\s*([0-9.]+)", text, re.MULTILINE)
         if matches:
             setattr(m, attr, _f(matches[-1]))
+        if label == r"decode_TPS":
+            # ``decode_TPS mean=`` lines appear ONLY inside a summary block, so
+            # the count is the count of parseable decode-summary blocks. Zero on
+            # a measured record => the summary section the producer keys off is
+            # absent / unparseable (bench-output drift). build_record fails loud.
+            m.decode_summary_blocks = len(matches)
 
     # TTFT summary line:  TTFT          mean=   120ms  std= ...
     ttft = re.findall(r"^\s*TTFT\s+mean=\s*([0-9.]+)ms", text, re.MULTILINE)
@@ -209,6 +258,7 @@ def parse_bench_output(text: str) -> BenchMetrics:
     # "W" token positionally per row.
     gpu_block = text.split("=== GPU state ===", 1)
     if len(gpu_block) == 2:
+        m.gpu_state_section_present = True
         for row in gpu_block[1].splitlines():
             row = row.strip()
             if not row or "," not in row:
@@ -228,6 +278,11 @@ def parse_bench_output(text: str) -> BenchMetrics:
                 watt = re.match(r"^([0-9.]+)\s*W$", cell)
                 if watt and idx not in m.power_draw_w:
                     m.power_draw_w[idx] = float(watt.group(1))
+        # Section present but no usable per-GPU VRAM row => malformed GPU-state
+        # line. Soft gap (VRAM is a fingerprint extension, not the core
+        # measured TPS): warn in build_record, do NOT raise.
+        if not m.vram_used_mib:
+            m.gpu_state_unparsed = True
 
     # Optional explicit power.limit line, if a caller appended one, e.g.:
     #   power.limit: 370.00 W   (per-rig fingerprint)
@@ -268,10 +323,26 @@ def build_record(
 ) -> dict[str, Any]:
     """Assemble ONE measurement record from a registry tag + parsed bench output.
 
-    Raises ``KeyError`` for an unknown tag (fail-loud — a typo'd tag should not
-    silently produce a garbage record).
+    Fail-loud, never write hollow calibration data:
+
+      * ``KeyError`` for an unknown tag (a typo'd tag should not silently
+        produce a garbage record);
+      * :class:`MeasuredRecordError` when ``result_class`` says the record is
+        *measured* (e.g. ``boot-fit-measured``) but the parse produced **no
+        decode TPS** — either because the bench summary block is absent /
+        unparseable (output drift) or no ``decode_TPS mean=`` was found. A
+        measured record with null TPS looks like real data to the optimizer's
+        calibration backbone but carries none, so the producer refuses it.
+
+    Softer gaps that do NOT invalidate the measured TPS (e.g. a malformed /
+    absent ``=== GPU state ===`` line, so per-GPU VRAM is unknown) are surfaced
+    as a top-level ``parse_warnings`` list on the record rather than raised, so
+    the record is still written but the gap is explicit (never a silent null).
+    Genuinely-optional/unknowable optimizer fields (``objective``,
+    ``confidence_tier``, ...) stay ``None`` — that is not a gap.
     """
     entry = COMPOSE_REGISTRY[tag]
+    parse_warnings: list[str] = []
 
     model_slug = entry["model"]
     arch = _read_model_family(model_slug)  # family slug, used verbatim
@@ -325,6 +396,45 @@ def build_record(
     if bench_metrics.decode_tps is not None:
         decode_tps_by_ctx["canonical-short"] = bench_metrics.decode_tps
 
+    # --- Fail-loud validation for MEASURED records -------------------------- #
+    # The producer's whole value is the measured decode TPS. For a measured
+    # result_class, refuse to emit a record with null TPS — distinguish the two
+    # ways it goes null so the error names the actual cause:
+    #   1. No parseable bench summary block at all => bench-output drift.
+    #   2. A summary block parsed but no decode number => incomplete metrics.
+    if _is_measured_result_class(result_class):
+        if bench_metrics.decode_summary_blocks == 0:
+            raise MeasuredRecordError(
+                f"result_class={result_class!r} is a MEASURED record but no "
+                "parseable bench summary block was found (expected a "
+                "'=== summary [...] ===' section with a 'decode_TPS mean=' "
+                "line). This is scripts/bench.sh output drift -- refusing to "
+                "write a hollow record with null TPS. Check the bench capture "
+                "format, or pass a non-measured --result-class if this run "
+                "genuinely produced no decode metrics."
+            )
+        if not decode_tps_by_ctx:
+            raise MeasuredRecordError(
+                f"result_class={result_class!r} is a MEASURED record but the "
+                "parse produced no decode TPS (empty decode_tps_by_ctx). A "
+                "measured record with null TPS is worse than no record for "
+                "optimizer calibration -- refusing to write it."
+            )
+
+    # Soft gap: GPU-state line absent/malformed -> per-GPU VRAM unknown. Warn,
+    # do NOT raise (VRAM is a fingerprint extension, not the core measured TPS).
+    if bench_metrics.gpu_state_unparsed:
+        parse_warnings.append(
+            "GPU-state section present but unparseable: no per-GPU VRAM row "
+            "matched (expected 'index, ... , <N> MiB, ...' from nvidia-smi); "
+            "peak_vram_mib_by_gpu is empty."
+        )
+    elif not bench_metrics.gpu_state_section_present:
+        parse_warnings.append(
+            "no '=== GPU state ===' section in bench output; per-GPU VRAM and "
+            "power-draw are unknown (peak_vram_mib_by_gpu is empty)."
+        )
+
     measured_extensions = {
         # Flagged producer-proposed; see module docstring + design Lock #6.
         "_note": (
@@ -365,6 +475,10 @@ def build_record(
         "provenance": provenance,
         # --- Producer extensions (clearly namespaced) ------------------------ #
         "measured_extensions": measured_extensions,
+        # Soft-gap diagnostics (never a silent null): a list naming each
+        # expected-but-absent/malformed datum that did NOT rise to a fail-loud
+        # raise. Empty list on a clean, well-formed bench output.
+        "parse_warnings": parse_warnings,
         # Carry the registry tag for traceability (not a frozen field; aids
         # the maintainer joining a record back to its config identity).
         "_tag": tag,
@@ -481,18 +595,27 @@ def main(argv=None) -> int:
         text = sys.stdin.read()
 
     metrics = parse_bench_output(text)
-    record = build_record(
-        tag=args.tag,
-        bench_metrics=metrics,
-        hardware=args.hardware,
-        engine_pin=args.engine_pin,
-        power_cap_w=args.power_cap_w,
-        result_class=args.result_class,
-        smoke_status=args.smoke_status,
-        soak_status=args.soak_status,
-        kv_calc_version=args.kv_calc_version,
-        arch_class=args.arch_class,
-    )
+    try:
+        record = build_record(
+            tag=args.tag,
+            bench_metrics=metrics,
+            hardware=args.hardware,
+            engine_pin=args.engine_pin,
+            power_cap_w=args.power_cap_w,
+            result_class=args.result_class,
+            smoke_status=args.smoke_status,
+            soak_status=args.soak_status,
+            kv_calc_version=args.kv_calc_version,
+            arch_class=args.arch_class,
+        )
+    except MeasuredRecordError as exc:
+        # Fail loud, but with a clean operator message (not a raw traceback).
+        print(f"[measurement_record] ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    # Surface soft-gap warnings so a partial record is never silently accepted.
+    for w in record.get("parse_warnings", []):
+        print(f"[measurement_record] WARNING: {w}", file=sys.stderr)
 
     if args.print_only:
         print(json.dumps(record, indent=2, sort_keys=False))
