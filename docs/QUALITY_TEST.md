@@ -136,16 +136,31 @@ ReasonMath-15 (v1.0.0)     |   11 / 15    |  73%  |    14.2s    |     22.6s   | 
 TOTAL                      |   65 / 75    |  87%  |             |             |
 
 Failure breakdown:
-  ToolCall-15           1 verifier_fail  (TC-07: wrong arg value for "filename")
-  InstructFollow-15     2 verifier_fail  (IF-03 word-count, IF-09 citation-format)
-  DataExtract-15        2 missing_field, 1 wrong_value
-  ReasonMath-15         4 wrong_answer   (RM-03, RM-07, RM-09, RM-12)
+- toolcall-15 TC-07: verifier_fail (wrong arg value for "filename": expected report.pdf, got output.pdf)
+- instructfollow-15 IF-03: verifier_fail (word count 247, target 250 ±5)
+- dataextract-15 DE-05: verifier_fail (7/14 atomic fields correct (50%). product_name: mismatch | product_price_paid: expected number)
+- reasonmath-15 RM-09: verifier_fail (expected 42, got 45)
 
 ==========================================================================
 Quality: line for compose schema field (paste into compose YAML header):
 ==========================================================================
 Quality:   ToolCall-15 14/15 (93%) · InstructFollow-15 13/15 (87%) · StructOutput-15 15/15 (100%) · DataExtract-15 12/15 (80%) · ReasonMath-15 11/15 (73%) (--medium, packs v1.0.x, 2026-05-09)
 ```
+
+## Diagnosing failures
+
+Failure reasons are surfaced in three places, cheapest first:
+
+| Need | Where |
+|---|---|
+| Why a scenario failed (reason + detail), run just finished | The **`Failure breakdown:`** block at the end of every run — `pack scenario: failure_mode (detail)`, full detail string. No extra command. |
+| Same, but the run scrolled away / an older run | `results/quality/quality-<ts>.json` (raw), or `benchlocal-cli inspect <json> --failed` |
+| The full prompt / response / verifier trace behind a failure | `benchlocal-cli inspect <json> --scenario <ID> --full` |
+| Filter by failure type · compare two runs · per-scenario tokens + latency | `benchlocal-cli inspect <json> --mode timeout` · `--diff prev.json` |
+
+`failure_mode` is one of: `verifier_fail` (answer wrong / below threshold) · `timeout` · `agent_runner_timeout` / `agent_runner_crashed` (sandboxed agentic packs) · `server_error` / `http_error` / `model_endpoint_unreachable` (serving problem, not a quality signal) · `result_json_malformed` · `wrong_answer` · `verifier_not_implemented` (stub, excluded from scoring).
+
+The breakdown is **terminal-only** — `quality-test.sh` does not tee it to a log file, but the same data persists in the saved JSON.
 
 ## Per-scenario timeouts
 
