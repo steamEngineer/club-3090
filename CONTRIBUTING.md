@@ -108,6 +108,8 @@ For contributors who know the `BENCHMARKS.md` section structure and want to prop
 
 New compose files (`models/<model>/<engine>/compose/docker-compose.<name>.yml`) get a tighter checklist than other PRs because they ship as a "supported" path that other people boot blind. The PR template enumerates these — bullets here are the *why*:
 
+**One model per PR.** A new-compose PR must add exactly one model (one set of sibling variants for a single model is fine; multiple *different* models is not). Each model needs its own validation gate, its own issue thread, and its own merge decision — bundling several into one PR means a blocker on any one of them stalls all of them, and per-model issues can't be tracked. If you've validated several, open one PR each and link them.
+
 **Single command captures all of (1)–(5) in one paste:**
 
 ```bash
