@@ -12,10 +12,11 @@ num_kv_heads: 8
 head_dim_sliding: 256
 global_head_dim: 512
 sliding_window: 1024
-# Model card claims 256K, but vLLM's gemma4_unified OOB-crashes on prefill past
-# 131072 (p-RoPE large-prefill bug, vllm#39914) — 131072 is the hard validated
-# ceiling on this engine.
-max_ctx_supported: 131072
+# Model card claims 256K via p-RoPE. Stock vLLM gemma4_unified OOB-crashes on
+# prefill past 131072 because the Gemma4 RoPE cache is sized from
+# max_position_embeddings instead of runtime max_model_len (vllm#39914). The
+# local vllm-gemma4-prope-longctx overlay fixes the cache sizing for vLLM.
+max_ctx_supported: 262144
 attention_k_eq_v: true
 weights:
   bf16:
