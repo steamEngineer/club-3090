@@ -9,16 +9,21 @@ model: gemma-4-12b
 # implied non-KV resident = 21.6 − 8.76 (= 8.16 GiB) ≈ 12.84 GB/card.
 #
 # INTEGRITY NOTE: these rows are the measured ground truth, NOT back-fit to make
-# the predictor agree. The shared Gemma dense formula UNDER-predicts the live KV
-# pool: it prices the available-KV pool at ~6.69 GB (≈204K tokens) vs the
-# measured 8.16 GiB (≈384K tokens) — a ~−47% token-capacity gap, from (a) the
-# fixed-budget being over-priced by ~2 GB (cudagraph/activation conservatism) and
-# (b) the per-token growing bytes (8 global layers × 8 kv-heads × 512 × 2 / TP2 =
-# 32,768 B) being higher than the live pool's effective ~22,816 B/token. The
-# constants are intentionally left UNTUNED (shared with gemma-4-31b); the verdict
-# stays directionally correct (TIGHT, boots, peak < 24 GB). Re-tune the Gemma
-# dense activation/per-token terms only with ≥4 gemma-4-12b anchors across KV
-# format / ctx / TP — do NOT fit to this single boot.
+# the predictor agree. REFINED 2026-06-04 — the gemma4_unified GLOBAL-KV per-token
+# term is now CALIBRATED to the measurement: kv-calc's gemma4-swa-dense branch uses
+# `measured_kv_growing_bpt_tp1=45,632` (= 22,816 B/tok/card) for the 12B, because
+# the 31B-derived global-only formula priced it at 32,768 B/tok/card
+# (8 global × 8 kv × 512 × bpe2 / TP2) — 1.44× too high. That fix moves predicted
+# token capacity ~204K → ~315K (vs the measured 384K). The shared activation +
+# cudagraph/overhead constants are intentionally LEFT UNTUNED (shared with
+# gemma-4-31b): the residual ~315K-vs-384K gap is the deliberately-conservative
+# `cudagraph_overhead_gb` (estimates ~1.70 GB/card at mem_util 0.90, but the
+# gemma4-unified image captured only 0.11 GiB — a tiny [1,2,4,8] graph set). Left
+# conservative ON PURPOSE: under-predicting capacity is the SAFE direction, and
+# trimming a SHARED term to fit one model would corrupt qwen / gemma-31b. The
+# verdict stays correct (TIGHT, boots, peak < 24 GB). To close the residual, add a
+# gemma4-unified-specific overhead calibration ONLY with ≥3 more anchors across
+# KV-format / ctx / TP — do NOT fit the shared term to this single boot.
 rows:
   - compose: vllm/gemma-12b-mtp
     vram_gb: 24

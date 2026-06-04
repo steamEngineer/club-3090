@@ -110,10 +110,13 @@ def _load_model_specs_from_yaml(profiles):
     # there is no int4/awq variant, so all three weight-size keys point at the
     # one real bf16 blob (23.9 GB) — this keeps _weights_per_card_gb()'s
     # int4/awq/bf16 branch from KeyError'ing regardless of which the resolver
-    # asks for. Activation/overhead constants are the SHARED Gemma dense
-    # constants — deliberately NOT re-tuned for this model.
+    # asks for. Activation/overhead constants stay the SHARED Gemma dense
+    # constants (NOT re-tuned). The ONE measured calibration is the growing
+    # KV per-token — `measured_kv_growing_bpt_tp1` (see kv_pool_per_card_bytes):
+    # gemma4_unified's global-layer KV measured 1.44x LOWER than the 31B-derived
+    # global-only formula predicts, so we ride the measurement for the 12B only.
     g12_bf16 = _weight_size(gemma12, "bf16")
-    g12spec = {"model_id": gemma12.id, "model_family": "gemma4-swa-dense", **{k: getattr(gemma12, k) for k in g_fields}, "valid_tp": list(gemma12.valid_tp), "weights_int4_gb": g12_bf16, "weights_awq_gb": g12_bf16, "weights_bf16_gb": g12_bf16, "drafter_mtp_gb": float(profiles.drafters["gemma-12b-it-assistant"].vram_footprint_gb), "mtp_n_default": profiles.drafters["gemma-12b-it-assistant"].n_default}
+    g12spec = {"model_id": gemma12.id, "model_family": "gemma4-swa-dense", **{k: getattr(gemma12, k) for k in g_fields}, "valid_tp": list(gemma12.valid_tp), "weights_int4_gb": g12_bf16, "weights_awq_gb": g12_bf16, "weights_bf16_gb": g12_bf16, "drafter_mtp_gb": float(profiles.drafters["gemma-12b-it-assistant"].vram_footprint_gb), "measured_kv_growing_bpt_tp1": 45632, "mtp_n_default": profiles.drafters["gemma-12b-it-assistant"].n_default}
     return {
         "qwen3.6-27b": qspec,
         "qwen3.6-35b-a3b": qmspec,
@@ -453,13 +456,28 @@ def kv_pool_per_card_bytes(spec, kv_format, max_ctx, max_num_seqs, tp, mtp_n=0):
 
     elif spec["model_family"] == "gemma4-swa-dense":
         # K==V tied → ×1 storage
-        per_token_growing = (
-            spec["num_full_attn_layers"]
-            * spec["num_kv_heads"]
-            * spec["global_head_dim"]
-            * 1  # K==V tied; vLLM stores once
-            * bpe
-        )
+        measured_bpt_tp1 = spec.get("measured_kv_growing_bpt_tp1")
+        if measured_bpt_tp1 is not None:
+            # gemma4_unified (gemma-4-12b) MEASURED calibration. The 31B-derived
+            # global-only formula (below) predicts 65,536 B/tok TP1 for the 12B
+            # (8 full x 8 kv x 512 global_head_dim x bpe2), but the LIVE
+            # gemma4_unified pool measured 22,816 B/tok/card = 45,632 TP1
+            # (8.16 GiB available KV / 384,019 tokens @ 131K / TP2 / mem-util
+            # 0.90, MTP, 2026-06-04) — 1.44x LOWER. Cause: gemma4_unified's
+            # unified-KV global layers + vLLM's hybrid-SWA pool accounting differ
+            # from the 31B's gemma4-swa-dense. bf16 baseline; scale by bpe for
+            # quantized KV. Single-anchor measured calibration; the precise arch
+            # decomposition is a TODO (needs vLLM kv_cache_utils source or >1
+            # anchor). Set ONLY on the 12B spec, so the 31B keeps the formula.
+            per_token_growing = measured_bpt_tp1 * (bpe / 2.0)
+        else:
+            per_token_growing = (
+                spec["num_full_attn_layers"]
+                * spec["num_kv_heads"]
+                * spec["global_head_dim"]
+                * 1  # K==V tied; vLLM stores once
+                * bpe
+            )
         # No MTP draft-token bump on Gemma — drafter is a separate model
         growing = (per_token_growing / tp) * max_ctx * max_num_seqs
 
