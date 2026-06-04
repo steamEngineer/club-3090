@@ -101,6 +101,8 @@ The directory hierarchy encodes model, engine, topology, and the weights artifac
 - `dual/awq/bf16-mtp.yml` — TP=2 + AWQ weights + BF16 KV + MTP
 - `multi4/autoround-int4/dflash.yml` — TP=4 + DFlash
 
+**Plain / default cases**: a compose with the engine-**default** KV and no drafter is `base.yml` — do NOT name the default KV (no `bf16.yml` when bf16 is the default; that's `base.yml`); name only a **non-default** KV (`int8.yml`, `fp8.yml`, `tq3.yml`). **Workload-tuned** variants (use-case ctx/sampling, not a feature delta) keep a descriptive name (`long-text.yml`, `tools-text.yml`, `bounded-thinking.yml`, `minimal.yml`). Names predating this are grandfathered — don't rename (it re-paths the registry `compose_path`). Full filename + registry-slug conventions: [`docs/ADDING_MODELS.md`](docs/ADDING_MODELS.md) → "Build the first compose."
+
 Concrete examples (post-2026-05-09 restructure):
 - `models/qwen3.6-27b/vllm/compose/single/autoround-int4/tq3-mtp.yml` — Qwen single-card default
 - `models/qwen3.6-27b/vllm/compose/single/autoround-int4/long-text.yml` — Qwen single-card text-only long-ctx variant

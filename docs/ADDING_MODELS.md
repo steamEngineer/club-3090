@@ -194,7 +194,12 @@ Place at `models/<model-id>/<engine>/compose/<topology>/<quant-slug>/<serving>.y
 - **⚠️ Registry slug prefix ≠ filesystem dir.** The slug prefixes are `vllm` / `llamacpp` / `ik-llama` / `beellama` — note **`llamacpp`, NOT `llama-cpp`** (`registry-emit.sh` special-cases it). So a `models/<id>/llama-cpp/…` compose registers under a `llamacpp/<slug>` key, e.g. `llamacpp/gemma-12b-single-q8kxl` (not `llama-cpp/gemma-12b-single-q8kxl`).
 - Topologies: `single`, `dual`, `multi4`
 - Quant slug: exactly matches the `weights_variant` key (`autoround-int4`, `awq`, `unsloth-q4km`, etc.)
-- Serving filename: the feature stack only (`fp8-mtp.yml`, `turbo.yml`, `dflash.yml`, etc.). Do not create `docker-compose.yml` or `default.yml`; defaults are registry pointers.
+- **Serving filename (`<serving>.yml`)** — the **serving-feature delta** from a plain boot; never the weights-quant (that's the `<quant>/` dir) or the topology (that's the path). Form: **`<drafter>[-<kv>][-vision].yml`**, suffix order drafter → KV → vision (per CLAUDE.md "Feature suffix order").
+  - `base.yml` — plain: engine-**default** KV, no drafter. Don't name the default KV (no `bf16.yml` when bf16 is the default — that's `base.yml`); only name a **non-default** KV (`int8.yml`, `fp8.yml`, `tq3.yml`).
+  - Drafter / combined: `mtp.yml`, `dflash.yml`, `fp8-mtp.yml`, `mtp-vision.yml`.
+  - **Workload-tuned** variants (a use-case tuning — different ctx/sampling, *not* a feature delta) keep a descriptive name: `long-text.yml`, `tools-text.yml`, `bounded-thinking.yml`, `minimal.yml`. Recognized exception, orthogonal to the feature stack.
+  - Never `docker-compose.yml` or `default.yml` — defaults are registry pointers (`DEFAULTS`).
+  - **Grandfathered (do NOT rename):** files predating this stay as-is (e.g. `bf16.yml` for a default-KV variant, `turbo.yml`, `two-stage.yml`) — renaming re-paths the registry `compose_path` for pure churn. New composes only.
 - **Registry slug (the key in `compose_registry.py`)** — for **new** models, compose it to mirror the path: **`<engine>/<model>-<topology>-<quant>[-<feature>]`** (the path components `<model>/<engine>/<topology>/<quant>/<serving>` flattened with hyphens, engine first). Make it self-descriptive — reading the slug should tell you the model, card count, quant, and serving stack.
   - `<engine>` — slug prefix from the rule above: `vllm` / `llamacpp` / `ik-llama` / `beellama`.
   - `<model>` — short model id: `gemma-12b`, `qwen-35b-a3b`.
