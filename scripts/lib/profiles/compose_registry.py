@@ -591,6 +591,19 @@ COMPOSE_REGISTRY = {
         status="experimental",
         status_note="Gemma-4-12B Intel AutoRound INT8 (W8A16) single 3090 on the gemma4_unified arch-preview image. Validated 2026-06-04: int8 loads on sm_86, coherent, KV pool ~433K tokens holds the full 262144 (NIAH exact-recall 140K/170K/200K/230K/241K). bf16 KV only (no fp8/INT8-PTH on this image). The high-fidelity single-card vLLM path; INT4 would trade quality for more concurrency. Ephemeral tag — pin a digest before any Production promotion.",
     ),
+    # Same INT8, + assistant external-drafter spec-decode (n=4). MTP fits the full
+    # 262144 on one card (drafter resident, KV pool ~310K tok). n-sweep 2026-06-04
+    # (code-gen): n2 96.7 / n3 115.5 / n4 117.0 / n5 122.5 TPS vs ~50 no-MTP.
+    "vllm/gemma-12b-int8-mtp": _entry(
+        model="gemma-4-12b", weights_variant="autoround-int8", workload="fast-chat",
+        engine="vllm-gemma4-unified", drafter="gemma-12b-it-assistant", kv_format="bf16",
+        tp=1, max_ctx=262144, max_num_seqs=4, mem_util=0.92,
+        compose_path="models/gemma-4-12b/vllm/compose/single/autoround-int8/mtp.yml",
+        default_port=8038,
+        kvcalc_key="gemma-4-12b:gemma-single-int8-mtp",
+        status="experimental",
+        status_note="Gemma-4-12B Intel AutoRound INT8 (W8A16) + assistant external drafter (n=4) single 3090 on the gemma4_unified arch-preview image. MTP fits the full 262144 (drafter resident, KV pool ~310K tok, 1.18x at 262K, ~20.7 GB). n-sweep 2026-06-04 code-gen: n=4 117 TPS / accept_len 3.67 (n=5 122.5 for code-max via SPEC_N=5) vs ~50 no-MTP. Output is lossless vs base.yml. bf16 KV only. Ephemeral tag — pin a digest before any Production promotion.",
+    ),
 
     # Gemma-4-12B single-card GGUF (Q8_K_XL) — the two engine-native single-3090
     # paths that fit the bf16-too-big model in 24 GB. Both llama.cpp-family

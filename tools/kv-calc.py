@@ -254,7 +254,7 @@ COMPOSE_ALIAS_TEXT = {
     # bare `gemma-dual` string here is harmless — compat + the CLI always pass
     # an explicit --model, and the reverse map is keyed by (unique) registry
     # slug. `gemma-dual` → the MTP dual; `gemma-no-mtp` → the no-drafter dual.
-    "gemma-4-12b": "gemma-dual=vllm/gemma-12b-mtp gemma-no-mtp=vllm/gemma-12b gemma-single-int8=vllm/gemma-12b-int8",
+    "gemma-4-12b": "gemma-dual=vllm/gemma-12b-mtp gemma-no-mtp=vllm/gemma-12b gemma-single-int8=vllm/gemma-12b-int8 gemma-single-int8-mtp=vllm/gemma-12b-int8-mtp",
     "gemma-4-26b-a4b": "gemma-a4b-single=vllm/gemma-a4b-single gemma-a4b=vllm/gemma-a4b gemma-a4b-awq=vllm/gemma-a4b-awq gemma-a4b-awq-mtp=vllm/gemma-a4b-awq-mtp",
 }
 COMPOSE_ALIASES = {model: tuple(part.split("=", 1) for part in text.split()) for model, text in COMPOSE_ALIAS_TEXT.items()}
