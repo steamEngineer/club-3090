@@ -41,7 +41,7 @@ assert_eq "$(model_default_target "$ROOT_DIR" qwen3.6-27b single 2>/dev/null)" \
 assert_eq "$(model_default_target "$ROOT_DIR" qwen3.6-27b dual 2>/dev/null)" \
   "vllm/dual" "qwen dual curated"
 assert_eq "$(model_default_target "$ROOT_DIR" qwen3.6-27b multi4 2>/dev/null)" \
-  "vllm/dual4" "qwen multi4 curated"
+  "vllm/dual4-dflash" "qwen multi4 curated"
 # gemma-4-31b dual → vllm/gemma-int8-mtp (full-ctx default; gemma-mtp is the stable fallback).
 assert_eq "$(model_default_target "$ROOT_DIR" gemma-4-31b dual 2>/dev/null)" \
   "vllm/gemma-int8-mtp" "gemma dual curated"
@@ -89,7 +89,7 @@ PIN=CLUB3090_DEFAULT_QWEN3_6_27B
 # Valid pin on matching topology → honoured.
 ( export "$PIN=vllm/dual"; assert_eq "$(model_default_target "$ROOT_DIR" qwen3.6-27b dual 2>/dev/null)" "vllm/dual" "valid pin honoured" )
 # (NA) pin → warn + fall back to curated.
-( export "$PIN=vllm/dual-int8"
+( export "$PIN=vllm/dual-dflash"
   out="$(model_default_target "$ROOT_DIR" qwen3.6-27b dual 2>&1 1>/dev/null)"
   slug="$(model_default_target "$ROOT_DIR" qwen3.6-27b dual 2>/dev/null)"
   assert_contains "$out" "(NA: deprecated)" "(NA) pin warns"
