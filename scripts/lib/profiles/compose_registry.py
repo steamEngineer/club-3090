@@ -508,12 +508,12 @@ COMPOSE_REGISTRY = {
     "vllm/gemma-26ba4b-single": _entry(
         model="gemma-4-26b-a4b", weights_variant="awq", workload="fast-chat",
         engine="vllm-stable", drafter="gemma-26b-it-assistant", kv_format="bf16",
-        tp=1, max_ctx=16384, max_num_seqs=256, mem_util=0.92,
+        tp=1, max_ctx=42000, max_num_seqs=256, mem_util=0.92,
         compose_path="models/gemma-4-26b-a4b/vllm/compose/single/awq/mtp.yml",
         default_port=8040,
         kvcalc_key="SKIP",
         status="experimental",
-        status_note="AWQ MoE + external MTP (gemma-26b-it-assistant n=4) on stock v0.22.0 — boot+coherence+tool-call validated 2026-06-06 (1x 3090, Marlin WNA16 MoE). Max ctx 16K (KV pool 17,490 tok after 17 GB weights + drafter). Promote after rebench-full + soak.",
+        status_note="AWQ MoE + external MTP (gemma-26b-it-assistant n=4) on stock v0.22.0 — boot+coherence+tool-call+NIAH(to 37.6K) validated 2026-06-06 (1x 3090, Marlin WNA16 MoE). Max ctx 42K laddered (KV pool 42,993 tok at 42000/0.92; vLLM boot-est ceiling 44,224); ~993 tok headroom, one full-42K request at a time. Promote after rebench-full + soak.",
     ),
     "vllm/gemma-26ba4b-dual": _entry(
         model="gemma-4-26b-a4b", weights_variant="awq", workload="fast-chat",

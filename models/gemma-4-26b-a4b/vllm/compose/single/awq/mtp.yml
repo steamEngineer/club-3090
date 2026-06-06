@@ -6,13 +6,18 @@
 #   KV:        bfloat16 (Ampere fp8 dead for gemma4: fp8_e5m2 hits the
 #              gemma4_mm.py allowlist assert, fp8_e4m3 hits Triton fp8e4nv)
 #   Vision:    off (limit-mm-per-prompt image=0 audio=0)
-#   Max ctx:   16K (laddered max — KV pool 17,490 tok at 0.92 util on 1x 3090
-#              with the drafter loaded; 17,408 would leave <100 tok headroom)
+#   Max ctx:   42K (laddered max — KV pool 42,993 tok at 42000/0.92 util on 1x
+#              3090 with the drafter; vLLM boot-est ceiling 44,224. NIAH recall
+#              clean to 37.6K with no degradation, 2026-06-06)
 #   Genesis:   N/A — Gemma 4 family is not Qwen3-Next
 #   Status:    🧪 Experimental — AWQ MoE + external MTP on stock v0.22.0 (#326)
-#   Caveats:   Boot + coherence + tool-call validated 2026-06-06 on 1x RTX 3090
-#              (Marlin WNA16 MoE, ~22 GB). Single-card max ctx is 16K (vs 262K on
-#              the dual) — weights (17 GB) + drafter leave only ~17.5K KV tokens.
+#   Caveats:   Boot + coherence + tool-call + NIAH (clean to 37.6K) validated
+#              2026-06-06 on 1x RTX 3090 (Marlin WNA16 MoE). Single-card max ctx
+#              is 42K (vs 262K on the dual) — 17 GB weights + drafter leave only
+#              ~1.8 GiB for KV (~993 tok / 1.31 GB headroom → one full-42K request
+#              at a time; short requests pack more). For >42K single-card, use a
+#              llama.cpp GGUF with q8/q4 KV quant (vLLM gemma4 KV is bf16-only on
+#              Ampere). 0.92 util is the safe ceiling — do not raise it here.
 #              Promote to ⚠️ after rebench-full + soak. The AutoRound INT4-mixed
 #              sibling is Ampere-dead (uint8b128 has no sm_86 W4A16 kernel).
 # ---------------------------------------------------------------------------
@@ -80,7 +85,7 @@ services:
       - --pipeline-parallel-size
       - "${PP:-1}"
       - --max-model-len
-      - "${MAX_MODEL_LEN:-16384}"
+      - "${MAX_MODEL_LEN:-42000}"
       - --gpu-memory-utilization
       - "${GPU_MEMORY_UTILIZATION:-0.92}"
       - --max-num-seqs
