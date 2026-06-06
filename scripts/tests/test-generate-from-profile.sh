@@ -65,6 +65,11 @@ def mk_der(*, weight_format=None, torch_dtype=None, selected=None, slug="org/Mod
 def mk_einput(profile_like, *, der, gpu_count=2, sel_gpus=(0, 1),
               slug="org/My-Model", trc=False):
     rt = dict(COMPOSE_REGISTRY[profile_like])
+    # The base fixture is a CLEAN derived seed: clear any drafter the registry
+    # slug carries (the drafter-refuse fixture below sets one explicitly). Keeps
+    # the positive + non-drafter-negative cases stable when a base slug like
+    # vllm/gemma-26ba4b-single later gains an MTP drafter (#326).
+    rt["drafter"] = None
     return EInput(
         slug=slug,
         terminal="proceed",
