@@ -501,19 +501,21 @@ COMPOSE_REGISTRY = {
         status_note="Dual-card beellama Gemma-4-31B Q8_K_XL + DFlash (Anbeeld DFlash-IQ4_XS draft). v0.3.0 sm_86 2026-06-01: 192K balanced ceiling (tensor-split 0.55,0.45 → ~21.4/21.9 GB; 262K OOMs — Gemma full-attn layers grow KV). High-fidelity Q8 sibling of beellama/gemma-dflash-dual (q4ks). Earlier 'v0.3.0-wide DFlash-on-PROSE regression' RETRACTED (2026-06-03) — didn't reproduce on qwen single+dual or gemma single; was an AR over-read + wrong baseline. This gemma-Q8-dual not separately re-benched. Promote on a STABLE tag.",
     ),
 
-    # Gemma 4 26B-A4B MoE — AWQ on stock vLLM v0.22.0 (#326, 2026-06-06).
-    # AWQ-4bit (compressed-tensors) MoE experts resolve to Marlin WNA16 MoE on
-    # Ampere sm_86; the AutoRound INT4-mixed variant is Ampere-dead (uint8b128,
-    # no W4A16 kernel) and was archived. No overlay (PR #40886 is in v0.22.0).
+    # Gemma 4 26B-A4B MoE — AWQ on vLLM v0.22.0. AWQ-4bit (compressed-tensors) MoE
+    # experts resolve to Marlin WNA16 MoE on Ampere sm_86; the AutoRound INT4-mixed
+    # variant is Ampere-dead (uint8b128, no W4A16 kernel) and was archived.
+    # Single (#465, 2026-06-06): INT8-PTH KV via vendored PR #40391 (vllm-gemma-stable)
+    # lifts the single-card ceiling to long context (240K NIAH-clean) vs the prior
+    # bf16/16K path. Dual stays bf16/262K (no overlay; PR #40886 is in v0.22.0).
     "vllm/gemma-26ba4b-single": _entry(
         model="gemma-4-26b-a4b", weights_variant="awq", workload="fast-chat",
-        engine="vllm-stable", drafter="gemma-26b-it-assistant", kv_format="bf16",
-        tp=1, max_ctx=16384, max_num_seqs=256, mem_util=0.92,
-        compose_path="models/gemma-4-26b-a4b/vllm/compose/single/awq/mtp.yml",
+        engine="vllm-gemma-stable", drafter="gemma-26b-it-assistant", kv_format="int8_per_token_head",
+        tp=1, max_ctx=176000, max_num_seqs=256, mem_util=0.94,
+        compose_path="models/gemma-4-26b-a4b/vllm/compose/single/awq/int8.yml",
         default_port=8040,
         kvcalc_key="SKIP",
         status="experimental",
-        status_note="AWQ MoE + external MTP (gemma-26b-it-assistant n=4) on stock v0.22.0 — boot+coherence+tool-call validated 2026-06-06 (1x 3090, Marlin WNA16 MoE). Max ctx 16K (KV pool 17,490 tok after 17 GB weights + drafter). Promote after rebench-full + soak.",
+        status_note="AWQ MoE + external MTP (gemma-26b-it-assistant n=4) + INT8-PTH KV via vendored PR #40391 on vLLM v0.22.0 (vllm-gemma-stable). Boot+coherence+tool-call validated 2026-06-06 (1x 3090, Marlin WNA16 MoE); INT8-PTH KV NIAH-clean to 240K on the no-drafter 262K boot. INT8-PTH (1 byte/tok) lifts single-card ctx from the prior bf16/16K to a 176K default — mem_util 0.94 (0.96 OOM'd in the drafter's cudagraph-capture tail), KV pool est. max-len 185,504 with the drafter loaded; 176K leaves headroom. Promote after rebench-full + soak (#464).",
     ),
     "vllm/gemma-26ba4b-dual": _entry(
         model="gemma-4-26b-a4b", weights_variant="awq", workload="fast-chat",
