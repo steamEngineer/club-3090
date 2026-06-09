@@ -23,7 +23,11 @@ services:
       #   - OPENAI_API_BASE_URL=http://host.docker.internal:4000/v1
       #   - OPENAI_API_KEY=sk-litellm-master-key
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
-      - WEBUI_SECRET_KEY=change-this-secret-key
+      # Leave empty → Open WebUI generates a strong random key on first boot and persists it
+      # in the data volume (.webui_secret_key). NEVER ship a hardcoded shared secret (it would
+      # let anyone forge session tokens). Override via the host env only to share sessions
+      # across replicas: WEBUI_SECRET_KEY=<your-secret> docker compose up -d
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-}
 
       # --- Web search / RAG ---
       - ENABLE_RAG_WEB_SEARCH=true
