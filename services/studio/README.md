@@ -25,6 +25,7 @@ architecture, capabilities and the measured length limits live in **[../../docs/
 | `tts/` | `docker compose` + Dockerfile for integrated voices (`:8192`): **Kokoro-82M** (ONNX, CPU) generates a voiceover and a **layer-aware ffmpeg mixdown** ducks it over the clip's native audio + loudness-normalizes. The pipe POSTs `/narrate` when the message has a `voiceover:`/`narration:` directive. No GPU. See ai-studio/video.md "Integrated audio". |
 | `step-voice/` | `docker compose` + Dockerfile for the **premium voice** service (`:8193`): **Step-Audio-EditX** (3B, Apache) — zero-shot voice cloning + emotion/style/paralinguistic **editing**. **ISOLATED container** pinned to `transformers==4.53.3` (the version the model needs; conflicts with ComfyUI's 5.x), GPU (~14 GB bf16, pinned to a free card). The pipe POSTs `/clone`. On-demand (not always-on). Weights: `Step-Audio-EditX` + `Step-Audio-Tokenizer` under `models/Step-Audio/`. |
 | `extend_chain.py` | The same chaining as a standalone host CLI (handy for scripted long renders). |
+| `push-pipe-to-owui.sh` | Regenerate `studio_pipe.py` **and push it into the running Open WebUI function + reload**. OWUI stores the pipe code in its DB (not from the file), so after editing `build_studio_pipe.py` you must update the installed function — this does it in one command. `--no-reload` to skip the OWUI restart. |
 
 ## Install the pipe into Open WebUI
 
@@ -43,6 +44,12 @@ save, enable. Eight models appear in the picker:
 - `🎵 Studio · Music` — ACE-Step (songs + instrumentals)
 - `🔊 Studio · SFX` — Stable Audio (sound effects + ambient)
 - `🎙️ Studio · Voice` — Step-Audio-EditX premium voice (zero-shot clone + emotion/style)
+
+> **Updating an already-installed pipe:** OWUI keeps the pipe **code in its DB**, not from the
+> file — so regenerating `studio_pipe.py` alone won't take effect (the classic "stale function"
+> trap). After any change to `build_studio_pipe.py`, run **`bash push-pipe-to-owui.sh`** (rebuilds
+> + writes the new code into the OWUI `studio` function + restarts OWUI to reload it). First-time
+> install is still the paste step above.
 
 Set the pipe's **Valves** (gear icon on the function):
 - `comfyui_url` → your ComfyUI (`http://host.docker.internal:8188` from the OWUI container)
