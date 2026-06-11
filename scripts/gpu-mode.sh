@@ -18,6 +18,9 @@ GEMMA_DUAL_AWQ_DIR="$CLUB3090_DIR/models/gemma-4-31b/vllm/compose/dual/awq"
 # Qwen3.6-40B-Deckard: uncensored dense 40B, Q6_K GGUF + embedded MTP head,
 # layer-split across both cards (llama.cpp). Dual-only — see `gpu-mode deckard`.
 DECKARD_DIR="$CLUB3090_DIR/models/qwen3.6-40b-deckard/llama-cpp/compose/dual/piehsoft-q6k"
+# DiffusionGemma 26B-A4B — vLLM's first dLLM (TP=2, official :gemma image + 3 fix-mounts).
+# Dual-only (both cards). See `gpu-mode dgemma`. 🧪 experimental.
+DGEMMA_DIR="$CLUB3090_DIR/models/diffusiongemma-26b-a4b/vllm/compose/dual/fp8"
 # Image-studio chat brain: gemma-4-12b single-card (llama.cpp), pinned to the spare GPU
 # so it coexists with ComfyUI image gen (different card). See `gpu-mode image-studio`.
 GEMMA_12B_DIR="$CLUB3090_DIR/models/gemma-4-12b/llama-cpp/compose/single/unsloth-q8kxl"
@@ -203,6 +206,15 @@ start_deckard() {
 stop_deckard() {
     printf "  ${RED}▼${NC} Stopping deckard-40b..."
     compose_at "$DECKARD_DIR" "down" mtp.yml && echo "done" || echo "skipped"
+}
+start_diffusiongemma() {
+    printf "  ${GREEN}▲${NC} Starting diffusiongemma-26b-a4b (dLLM)..."
+    # PORT=8199 = the dual-card "active big model" slot (shared with deckard).
+    compose_at_env "$DGEMMA_DIR" "up -d" base.yml PORT=8199 && echo "done" || echo "failed"
+}
+stop_diffusiongemma() {
+    printf "  ${RED}▼${NC} Stopping diffusiongemma-26b-a4b..."
+    compose_at_env "$DGEMMA_DIR" "down" base.yml PORT=8199 && echo "done" || echo "skipped"
 }
 
 show_status() {
@@ -531,6 +543,34 @@ mode_gemma_awq() {
     echo -e "${YELLOW}Tail: sudo docker logs -f vllm-gemma-4-31b-awq${NC}"
 }
 
+mode_diffusiongemma() {
+    echo -e "${CYAN}═══ Switching to DiffusionGemma 26B-A4B mode (dLLM, dual-card) 🧪 ═══${NC}"
+    echo "Starting: DiffusionGemma 26B-A4B (vLLM's first diffusion LM) — official :gemma image"
+    echo "          + 3 Ampere/TP fix-mounts, fp8, TP=2, 262K (vLLM, :8199)"
+    echo "Stopping: all other GPU models (DiffusionGemma uses both cards, TP=2)"
+    echo ""
+    stop_service ollama
+    stop_all_27b
+    stop_all_gemma
+    stop_gemma_12b_chat
+    stop_comfyui
+    stop_deckard
+    start_diffusiongemma
+    start_service litellm
+    start_service qdrant
+    start_service openwebui
+    start_service searxng
+    # Not in the LiteLLM gateway config → wire into Open WebUI directly (reuses
+    # switch.sh --owui's helper). Best-effort: no-op if OWUI isn't up yet.
+    if [ -x "$CLUB3090_DIR/scripts/lib/owui-register.sh" ]; then
+        bash "$CLUB3090_DIR/scripts/lib/owui-register.sh" 8199 || true
+    fi
+    echo ""
+    echo -e "${GREEN}DiffusionGemma mode active.${NC} API: http://192.168.86.33:8199  (model: diffusiongemma-26b-a4b)"
+    echo -e "${YELLOW}🧪 experimental — block-parallel dLLM; SSE streams a whole canvas per chunk.${NC}"
+    echo -e "${YELLOW}Tail: sudo docker logs -f vllm-diffusiongemma-26b-a4b-fp8-tp2${NC}"
+}
+
 mode_comfyui() {
     echo -e "${CYAN}═══ Switching to ComfyUI mode (image / video gen) ═══${NC}"
     echo "Starting: ComfyUI :8188"
@@ -739,6 +779,7 @@ mode_off() {
     echo -e "${CYAN}═══ Stopping ALL services ═══${NC}"
     stop_all_27b
     stop_deckard
+    stop_diffusiongemma
     stop_all_gemma
     stop_comfyui
     stop_estate
@@ -768,6 +809,7 @@ usage() {
     echo ""
     echo "  Qwen 3.6 40B Deckard (uncensored, dual 3090, llama.cpp):"
     echo "  deckard            Q6_K + MTP n=2 + q8_0 KV + 128K ctx (:8199) — text-only, both cards"
+    echo "  dgemma             DiffusionGemma 26B-A4B dLLM 🧪 (:8199) — fp8, 262K, both cards (run 'off' before switching)"
     echo ""
     echo "  Image / Video Gen:"
     echo "  image-studio       ⭐ Ideogram-4 image gen (GPU0) + gemma-4-12b chat (GPU1) + Open WebUI"
@@ -798,6 +840,7 @@ case "${1:-}" in
     gemma-int8)         mode_gemma_int8 ;;
     gemma-mtp)          mode_gemma ;;
     deckard)            mode_deckard ;;
+    diffusiongemma|dgemma) mode_diffusiongemma ;;
     comfyui)            mode_comfyui ;;
     image-studio|imagestudio) mode_image_studio ;;
     bigmodel)           mode_bigmodel ;;
