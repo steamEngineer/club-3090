@@ -8,25 +8,12 @@
 #   Vision:    no (text diffusion)
 #   Max ctx:   262144 (NIAH retrieval validated to ~250K)
 #   Genesis:   N/A — Genesis is Qwen3-Next-specific
-#   Status:    ⏸️ Upstream-gated — works on Ampere, but boots only via the vendored
-#              overlay until vllm#45163 merges into a pinnable engine.
-#   Caveats:   The DiffusionGemma arch exists in NO released/nightly vLLM — only in
-#              the UNMERGED PR vllm#45163 (https://github.com/vllm-project/vllm/pull/45163).
-#              Delivery = stock PULLABLE nightly + a SIDELOADED overlay applied at
-#              boot (install_script), NOT a baked custom image:
-#                • image = stock `vllm/vllm-openai:nightly-2c9c07c8…` (everyone can pull it)
-#                • ../../../patches/dgemma-overlay/ = the vendored payload: the full
-#                  stock-nightly-vs-dgemma-branch delta (123 vllm/*.py files — the
-#                  PR's formal 41-file set version-skews, since load-bearing dgemma
-#                  changes like build_attn_metadata's `causal` kwarg live outside the
-#                  PR diff) + Codex's 3 fixes (marlin.py + marlin_utils_fp8.py K-pad
-#                  for fp8 Marlin W8A16 on sm_86's 99 KB shared mem; diffusion_gemma.py
-#                  TP-vocab soft-embed + :656 dtype cast). install.sh cp's it over the
-#                  installed vllm pkg before the server starts (fail-loud arch assert).
-#              REBASE when the nightly moves/is purged: re-pin the image + regenerate
-#              the overlay (see ../../../patches/dgemma-overlay/README.md). Not
-#              pinnable-stable until #45163 merges — then this collapses to one pin.
-#              Runs EAGER-ONLY (torch.compile works but gives no throughput gain).
+#   Status:    🧪 Experimental — DiffusionGemma (vLLM's first dLLM) sideloaded onto a
+#              stock nightly via the UNMERGED vllm#45163 overlay; under active validation,
+#              eager-only. Launch needs --force (non-functional status). The full sideload
+#              rationale (why the 123-file overlay not the PR's 41; the #45163 gating; the
+#              rebase-when-the-nightly-is-purged story) lives in the prose below +
+#              ../../../patches/dgemma-overlay/README.md.
 #   Quality:   8-pack 100/150 (67%) — toolcall 13/15 · instructfollow 13-15/15 ·
 #              structoutput 14/15 · dataextract 10/15 · reasonmath 11/15 ·
 #              bugfind 11/15 · hermesagent-20 14/20 (agentic tool-use works) ·
