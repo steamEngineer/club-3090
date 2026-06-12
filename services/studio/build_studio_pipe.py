@@ -87,7 +87,7 @@ title: Studio (text/image -> video · image · music)
 author: club-3090
 description: Type a rough idea — the studio director (qwen) crafts it and generates. Video: LTX (video+audio) or Sulphur (uncensored), text->video or attach an image, with optional voiceover. Image: HiDream-O1 (top quality), Ideogram-4 (design/logo/photo/text), or Chroma (uncensored). Music: ACE-Step (songs + instrumentals). SFX: Stable Audio (sound effects + ambient). Voice: Step-Audio-EditX (premium cloned voice + emotion/style). Refine anytime by just saying what to change.
 required_open_webui_version: 0.5.0
-version: 0.13.2
+version: 0.13.3
 """
 # ── Pipeline defaults (this rig, 2x 3090, measured 2026-06-11) ──────────────────
 #  Video lanes: ltx = LTX-2.3-distilled (video+audio) · sulphur = uncensored dev fine-tune
@@ -539,6 +539,19 @@ class Pipe:
             if __event_emitter__:
                 await __event_emitter__({"type": "status", "data": {"description": msg, "done": done}})
         model = str(body.get("model", ""))
+        # OWUI runs its internal TASK prompts (title / tags / follow-up / autocomplete generation)
+        # against the SELECTED model — which IS this generation pipe — and would render each one as
+        # an image/clip (the mystery "second blocked image"). Detect + skip them, no GPU spend.
+        # Proper OWUI-side fix too: Admin -> Settings -> Interface -> set a chat "Task Model".
+        _lastu = ""
+        for _m in reversed(body.get("messages", [])):
+            if _m.get("role") == "user":
+                _c = _m.get("content")
+                _lastu = (" ".join(p.get("text", "") for p in _c if isinstance(p, dict)) if isinstance(_c, list) else (_c or ""))
+                break
+        if ("### Task:" in _lastu or "### Chat History:" in _lastu or "### Guidelines:" in _lastu
+                or "<chat_history>" in _lastu or "autocompletion" in _lastu.lower()):
+            return ""   # OWUI internal task prompt, not a user generation request — do not render
         if "music" in model:
             lane = "music"
         elif "sfx" in model:
