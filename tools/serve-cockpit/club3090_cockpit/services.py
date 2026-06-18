@@ -55,17 +55,21 @@ from .data import (
     DoctorReport,
     EstateDiagnose,
     EstateState,
+    EvaluateHandoff,
     EvidenceReport,
     EvidenceTag,
     FitVerdict,
     GpuConflict,
     Measurement,
+    OptimizerReport,
     PowerCapState,
     ProfileTriage,
+    PromoteScaffold,
     ReconcileResult,
     Scene,
     bench_row_from_corpus_record,
     bench_rows_from_benchmarks_md,
+    compute_promote_scaffold,
     measurement_from_explain_benchmarks,
     parse_benchmarks_md_for_slug,
     parse_docker_top,
@@ -1408,6 +1412,189 @@ class CockpitData:
             force=force,
             force_reason=force_reason,
         )
+
+    # ════════════════════════════════════════════════════════════════════════════
+    # PHASE 5 — the three v2 hooks (Evaluate · Promote-to-catalog · Optimize)
+    # ════════════════════════════════════════════════════════════════════════════
+
+    # ── Hook 1: Evaluate — hand the SHARED ServingTarget to c3t (design §4) ────────
+
+    def evaluate_handoff(self, target: Optional[ServingTarget]) -> EvaluateHandoff:
+        """Build the c3t Evaluate hand-off for a running target (Estate → ▸ Evaluate).
+
+        Hands the SHARED ``club3090_tui_core.detect.ServingTarget`` (the SAME
+        dataclass c3t speaks — design §4/§6.6) to the post-boot evaluator at
+        ``tools/test-console``.  The launch is HEAVY (c3t runs tests against the
+        live serving model), so the plan is ``requires_confirm=True`` and is
+        execution-MOCKED this phase — ``launch_evaluate`` streams it via the write
+        runner which conftest blocks / tests fake.  It does NOT claim or free a
+        GPU (c3t only HITS the endpoint) → ``requires_reconcile=False``.
+
+        ``target`` is carried by IDENTITY on the returned handoff so the receiver
+        evaluates exactly what's running.  The launch invokes ``scripts/c3t``
+        (the isolated-env launcher) with the target's endpoint/model/container
+        passed through env so c3t scopes to the current target rather than
+        re-detecting; the env is injected at LAUNCH time (``launch_evaluate``),
+        not baked into the inspectable cmd here."""
+        if target is None or not getattr(target, "url", ""):
+            # Nothing serving — there is no running model for c3t to evaluate.
+            return EvaluateHandoff(
+                target=target,
+                plan=ActionPlan(
+                    kind="evaluate",
+                    cmd=["bash", "scripts/c3t"],
+                    description="c3t (no running target)",
+                    requires_reconcile=False,
+                    requires_confirm=True,
+                ),
+                available=False,
+                reason="no running serving target detected — start a model first",
+            )
+        model = getattr(target, "model", "") or ""
+        url = getattr(target, "url", "") or ""
+        plan = ActionPlan(
+            kind="evaluate",
+            cmd=["bash", "scripts/c3t"],
+            description=f"c3t evaluate → {model or url}",
+            requires_reconcile=False,    # c3t hits the endpoint; claims no GPU
+            requires_confirm=True,       # heavy — runs tests against the model
+        )
+        return EvaluateHandoff(target=target, plan=plan, available=True)
+
+    async def launch_evaluate(
+        self,
+        target: Optional[ServingTarget],
+        *,
+        on_event: Optional[Callable[[Any], None]] = None,
+        on_line: Optional[Callable[[str], None]] = None,
+    ) -> Any:
+        """Launch c3t scoped to the SHARED ServingTarget, streamed (MOCK-ONLY).
+
+        ⚠️  WIRED-BUT-MOCK-ONLY.  c3t runs the post-boot evaluator against the
+        live serving model — heavy.  The write runner is NEVER executed live this
+        phase; conftest blocks the real spawn and tests inject a FakeWriteRunner.
+
+        Scopes c3t to ``target`` by passing the endpoint/model/container through
+        the child env (``C3T_REPO_ROOT`` + ``C3T_TARGET_*``) so the test-console
+        preselects the SAME running model rather than re-detecting.  Confirmation
+        is the CALLER's job (the Estate pane wires a confirm modal before calling
+        this — the handoff plan always ``requires_confirm``)."""
+        import os as _os
+
+        handoff = self.evaluate_handoff(target)
+        env = dict(_os.environ)
+        env["C3T_REPO_ROOT"] = str(self.repo_root)
+        if target is not None:
+            # Scope c3t to the SAME target (shared ServingTarget fields).
+            if getattr(target, "url", ""):
+                env["C3T_TARGET_URL"] = target.url
+            if getattr(target, "model", ""):
+                env["C3T_TARGET_MODEL"] = target.model
+            if getattr(target, "container", ""):
+                env["C3T_TARGET_CONTAINER"] = target.container
+            if getattr(target, "slug", ""):
+                env["C3T_TARGET_SLUG"] = target.slug
+        if on_event is not None or on_line is not None:
+            self._write_runner.set_callbacks(on_event=on_event, on_line=on_line)
+        return await self._write_runner.start_raw(
+            handoff.plan.cmd, env=env, run_type=handoff.plan.kind, parser=_NullParser()
+        )
+
+    # ── Hook 2: Promote to catalog — SCAFFOLD + GATE (design §3.5b) ────────────────
+
+    def promote_scaffold(
+        self,
+        *,
+        byo: Optional[ByoResult],
+        measurement: Optional[Measurement] = None,
+        model_id: str = "",
+        sibling_compose_path: str = "",
+    ) -> PromoteScaffold:
+        """COMPUTE + PREVIEW the catalog-promotion scaffold (design §3.5b).
+
+        For a served/validated BYO model, compute a ModelProfile YAML skeleton +
+        a ``compose_registry.py`` ``_entry(...)`` row from facts the app already
+        holds (the BYO pull-gate arch facts in ``byo`` + the Evidence
+        ``measurement`` numbers), match the REAL shapes
+        (``scripts/lib/profiles/models/*.yml`` + ``_entry(...)`` +
+        ``docs/ADDING_MODELS.md``), and attach a GATED hand-off plan.
+
+        In THIS phase: compute + preview ONLY.  The write-into-``scripts/`` + the
+        guard-suite run is the attached ``write_plan`` (built by
+        ``promote_write_plan``), which is MOCKED / never-executed and NEVER
+        auto-fires.  This method does NOT touch the filesystem."""
+        scaffold = compute_promote_scaffold(
+            byo=byo,
+            measurement=measurement,
+            model_id=model_id,
+            sibling_compose_path=sibling_compose_path,
+        )
+        if scaffold.computed:
+            scaffold.write_plan = self.promote_write_plan(scaffold)
+        return scaffold
+
+    def promote_write_plan(self, scaffold: PromoteScaffold) -> ActionPlan:
+        """Build the GATED, MOCK-ONLY write+guard ActionPlan for a scaffold.
+
+        ⚠️  REPO MUTATION — NEVER auto-fired / executed this phase.  This would
+        (a) write the profile YAML + registry row into ``scripts/lib/profiles/``
+        and (b) run the guard suite (``for t in scripts/tests/*.sh``).  Because it
+        mutates ``scripts/`` (a repo write) it is built but NEVER executed live —
+        ``requires_confirm=True``; tests assert it is mock-only and never reaches
+        the write runner.  It does NOT claim a GPU → ``requires_reconcile=False``.
+
+        The cmd is a guard-suite invocation as a PLACEHOLDER for the gated
+        action; the actual file-write is performed by the (future) promote tool,
+        not auto-written by the cockpit (do NOT auto-write into scripts/)."""
+        return ActionPlan(
+            kind="promote_catalog",
+            cmd=list(scaffold.guard_suite_cmd)
+            or ["bash", "-c", 'for t in scripts/tests/*.sh; do bash "$t"; done'],
+            description=(
+                f"promote {scaffold.model_id} → catalog "
+                f"(write {scaffold.profile_path} + registry {scaffold.registry_slug}, "
+                "then guard suite)"
+            ),
+            requires_reconcile=False,    # no GPU contention — a repo write
+            requires_confirm=True,       # repo mutation — confirm, never auto
+        )
+
+    # ── Hook 3: Optimize for my card — DORMANT v0.10.0 seam (design §5.2 seam 1) ────
+
+    async def optimize_for_card(
+        self, *, slug: str = "", card: Optional[str] = None
+    ) -> OptimizerReport:
+        """The ▸ Optimize-for-my-card seam — DORMANT until v0.10.0 (design §5.2).
+
+        The optimizer (``recommend --optimize`` / ``generate_compose.py
+        --optimize``) does NOT exist yet.  This detects its absence and returns an
+        ``OptimizerReport(available=False, message='optimizer not available
+        (v0.10.0)')`` — it NEVER fabricates optimizer output.  The honesty-gate
+        fields on the report (boot-fit predicted|measured · runtime
+        soak-validated · confidence tier · cliff-class --accept-runtime-risk) are
+        the reserved INTERFACE, rendered only once the engine lands.
+
+        Absence is detected via the read runner probing for the optimizer's
+        ``--optimize`` flag; any non-zero / missing result keeps the seam
+        dormant.  Until the engine exists this is, in practice, always
+        unavailable."""
+        # Probe for the optimizer flag.  When it lands it will print a JSON
+        # OptimizerReport on `recommend --optimize --json`; until then the probe
+        # returns non-zero / empty and we stay honestly dormant.
+        try:
+            res = await self._runner.run(
+                ["bash", "scripts/recommend.sh", "--optimize", "--probe"],
+                cwd=str(self.repo_root),
+                timeout=15.0,
+            )
+        except Exception:
+            return OptimizerReport(available=False)
+        if not res.ok or "optimize" not in (res.stdout or "").lower():
+            # No optimizer engine → dormant.  Do NOT fabricate a recommendation.
+            return OptimizerReport(available=False)
+        # (Reserved) — when the engine lands, parse its JSON honesty-gate output
+        # here.  Until then this branch is unreachable; keep the seam honest.
+        return OptimizerReport(available=False)
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────────

@@ -68,9 +68,13 @@ from .data import (
     ContainerInfo,
     DoctorReport,
     EstateState,
+    EvaluateHandoff,
     EvidenceReport,
     EvidenceTag,
+    Measurement,
+    OptimizerReport,
     PowerCapState,
+    PromoteScaffold,
     ReconcileResult,
     Scene,
     measurement_from_explain_columns,
@@ -137,8 +141,12 @@ class HelpScreen(ModalScreen):
 
 [bold]Estate · Orchestration[/bold]
   [cyan]o[/cyan] stop all   [cyan]c[/cyan] power-cap on/off   [cyan]w[/cyan] cap sweep   [cyan]p[/cyan] prune images   (all gated)
+  [cyan]v[/cyan] ▸ Evaluate the running target via c3t (confirm-gated · mock-only this phase)
 [bold]Estate · Containers[/bold]
   [cyan]l[/cyan] logs   [cyan]t[/cyan] top (read)   [cyan]s[/cyan] restart   [cyan]x[/cyan] stop   [cyan]X[/cyan] rm   (writes gated)
+[bold]Discover[/bold]
+  [cyan]P[/cyan] ▸ Promote a fit-checked BYO model to the catalog (scaffold + gated write)
+  [cyan]O[/cyan] ▸ Optimize for my card (v0.10.0 seam — not available yet)
 [bold]Validate[/bold]
   Run: [cyan]⏎[/cyan] launch step (gated)   Benchmarks: [cyan]/[/cyan] filter [cyan]t[/cyan] sort
   Evidence: [cyan]⏎[/cyan] open report   [cyan]s[/cyan] submit to localmaxxing (gated · never auto)
@@ -467,7 +475,9 @@ class ByoPane(Container):
         )
         yield Label(
             "[dim]Routes:  A = new curated profile   ·   B = serve-locally   ·   "
-            "C = reuse a sibling compose + swap weights[/dim]",
+            "C = reuse a sibling compose + swap weights\n"
+            "\\[P] ▸ Promote to catalog (scaffold + gated write)   "
+            "\\[O] ▸ Optimize for my card (v0.10.0 seam)[/dim]",
             id="byo-hint",
         )
 
@@ -865,7 +875,8 @@ class EstateOrchPane(Container):
             yield Label(
                 "[dim]\\[⏎] switch scene (gated)   \\[o] stop all (gated)   "
                 "\\[c] cap on/off (gated)   \\[w] cap sweep (gated)   "
-                "\\[p] prune images (gated)[/dim]",
+                "\\[p] prune images (gated)\n"
+                "\\[v] ▸ Evaluate the running target via c3t (confirm-gated · mock-only)[/dim]",
                 id="orch-hint",
             )
 
@@ -1602,6 +1613,221 @@ class EvidenceReportScreen(ModalScreen):
         self.app.pop_screen()
 
 
+# ── Phase 5 · Promote-to-catalog scaffold preview modal (design §3.5b) ────────────
+
+
+class PromoteScaffoldScreen(ModalScreen):
+    """Preview the computed catalog-promotion scaffold (SCAFFOLD + GATE).
+
+    Shows the ModelProfile YAML skeleton + the compose_registry _entry(...) row
+    COMPUTED from the BYO arch facts + Evidence numbers, plus the guard suite the
+    gated write would run.  ``⏎`` stages the GATED write+guard ActionPlan — which
+    is MOCK-ONLY this phase (it writes into scripts/ + runs the guard suite, so it
+    NEVER auto-fires / executes live).  ``Esc`` just closes the preview."""
+
+    DEFAULT_CSS = """
+    PromoteScaffoldScreen {
+        align: center middle;
+    }
+    PromoteScaffoldScreen > Vertical {
+        width: 100;
+        height: 84%;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    PromoteScaffoldScreen .promote-title {
+        text-style: bold;
+        color: $accent;
+        margin-bottom: 1;
+    }
+    PromoteScaffoldScreen #promote-scroll {
+        height: 1fr;
+    }
+    PromoteScaffoldScreen #promote-btn-row {
+        height: 3;
+        margin-top: 1;
+    }
+    PromoteScaffoldScreen Button {
+        margin-right: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+    ]
+
+    def __init__(self, scaffold: PromoteScaffold, *, on_stage_write=None, **kwargs):
+        super().__init__(**kwargs)
+        self._scaffold = scaffold
+        self._on_stage_write = on_stage_write
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label(
+                f"Promote to catalog · {self._scaffold.model_id or self._scaffold.repo or '—'}",
+                classes="promote-title",
+            )
+            with ScrollableContainer(id="promote-scroll"):
+                yield Static(self._body_text(), id="promote-body")
+            with Horizontal(id="promote-btn-row"):
+                yield Button(
+                    "⏎ Stage write (gated · mock-only)",
+                    id="promote-stage-btn",
+                    variant="warning",
+                    disabled=not self._scaffold.computed,
+                )
+                yield Button("Esc Close", id="promote-close-btn")
+
+    def _body_text(self) -> str:
+        from rich.markup import escape
+
+        s = self._scaffold
+        if s.error:
+            return f"[red]cannot scaffold:[/red] {escape(s.error)}"
+        lines: list[str] = []
+        lines.append("[dim]Design §3.5b — a SCAFFOLD + GATE, not a YAML IDE.  COMPUTED from the[/dim]")
+        lines.append("[dim]BYO pull-gate arch facts + the Evidence measured numbers.  Compute +[/dim]")
+        lines.append("[dim]preview ONLY — the write into scripts/ + guard run is gated & mock-only.[/dim]")
+        lines.append("")
+        lines.append(f"  [bold]ModelProfile[/bold]  [cyan]{escape(s.profile_path)}[/cyan]")
+        lines.append("")
+        for ln in s.profile_yaml.splitlines():
+            lines.append("    " + escape(ln))
+        lines.append("")
+        lines.append("  [bold]compose_registry.py[/bold]  entry "
+                     f"[green]{escape(s.registry_slug)}[/green]")
+        lines.append("")
+        for ln in s.registry_entry.splitlines():
+            lines.append("    " + escape(ln))
+        lines.append("")
+        lines.append("  [bold]Guard suite[/bold] (the gated write would run, never auto):")
+        lines.append("    [yellow]" + escape(" ".join(s.guard_suite_cmd)) + "[/yellow]")
+        if s.notes:
+            lines.append("")
+            lines.append("  [bold]Notes[/bold]")
+            for n in s.notes:
+                lines.append(f"    • [dim]{escape(n)}[/dim]")
+        lines.append("")
+        lines.append("  [dim]⏎ Stage the gated write+guard (MOCK-ONLY this phase) · Esc Close[/dim]")
+        return "\n".join(lines)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "promote-stage-btn":
+            self._stage_write()
+        elif event.button.id == "promote-close-btn":
+            self.action_dismiss()
+
+    def on_key(self, event) -> None:
+        if event.key == "enter":
+            btn = self.query_one("#promote-stage-btn", Button)
+            if not btn.disabled:
+                event.stop()
+                self._stage_write()
+
+    def _stage_write(self) -> None:
+        """Hand the GATED write+guard plan back to the app's confirm gate.  The
+        write is NEVER executed live this phase — it routes through the standard
+        ConfirmActionScreen (mock-only) and never auto-fires."""
+        self.app.pop_screen()
+        if self._on_stage_write is not None and self._scaffold.write_plan is not None:
+            self._on_stage_write(self._scaffold.write_plan)
+
+    def action_dismiss(self) -> None:
+        self.app.pop_screen()
+
+
+# ── Phase 5 · Optimize-for-my-card seam modal (DORMANT v0.10.0 — design §5.2) ──────
+
+
+class OptimizeScreen(ModalScreen):
+    """The ▸ Optimize-for-my-card seam — DORMANT until the v0.10.0 optimizer lands.
+
+    On open it invokes the seam, which detects the optimizer's absence and shows
+    'optimizer not available (v0.10.0)'.  The honesty-gate rendering (boot-fit
+    predicted|measured · runtime soak-validated · confidence tier · cliff-class
+    --accept-runtime-risk) is built into ``set_report`` but stays dormant — it
+    renders ONLY once the engine reports ``available=True``.  Never fabricates
+    optimizer output."""
+
+    DEFAULT_CSS = """
+    OptimizeScreen {
+        align: center middle;
+    }
+    OptimizeScreen > Vertical {
+        width: 80;
+        height: auto;
+        max-height: 80%;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    OptimizeScreen .optimize-title {
+        text-style: bold;
+        color: $accent;
+        margin-bottom: 1;
+    }
+    OptimizeScreen #optimize-body {
+        height: auto;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+    ]
+
+    def __init__(self, slug: str = "", **kwargs):
+        super().__init__(**kwargs)
+        self._slug = slug
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label(
+                f"Optimize for my card{(' · ' + self._slug) if self._slug else ''}",
+                classes="optimize-title",
+            )
+            yield Static("Querying the optimizer seam…", id="optimize-body")
+
+    def on_mount(self) -> None:
+        self.app.run_optimize_for_modal(self, self._slug)  # type: ignore[attr-defined]
+
+    def set_report(self, report: OptimizerReport) -> None:
+        body = self.query_one("#optimize-body", Static)
+        if not report.available:
+            # DORMANT seam — honest "not available", never a fabricated rec.
+            body.update(
+                f"  [yellow]{report.message}[/yellow]\n"
+                "\n"
+                "  [dim]The per-card optimizer (recommend --optimize /\n"
+                "  generate_compose.py --optimize) lands in v0.10.0.  When it does,\n"
+                "  this seam will show its honesty gates:[/dim]\n"
+                "    [dim]· boot-fit  predicted | measured[/dim]\n"
+                "    [dim]· runtime   soak-validated | unvalidated[/dim]\n"
+                "    [dim]· confidence tier[/dim]\n"
+                "    [dim]· cliff-class recs require --accept-runtime-risk[/dim]\n"
+                "\n"
+                "  [dim]Esc to close[/dim]"
+            )
+            return
+        # Reserved — rendered only once the engine lands (dormant today).
+        risk = (
+            "  [red]cliff-class — requires --accept-runtime-risk[/red]\n"
+            if report.accept_runtime_risk_required
+            else ""
+        )
+        body.update(
+            f"  [bold]Recommended[/bold]  [green]{report.recommended_slug or '—'}[/green]\n"
+            f"  [bold]boot-fit[/bold]    {report.boot_fit or '—'}\n"
+            f"  [bold]runtime[/bold]     {report.runtime or '—'}\n"
+            f"  [bold]confidence[/bold]  {report.confidence or '—'}\n"
+            + risk
+            + "\n  [dim]Esc to close[/dim]"
+        )
+
+    def action_dismiss(self) -> None:
+        self.app.pop_screen()
+
+
 # ── Mode switcher (left rail) ─────────────────────────────────────────────────────
 
 
@@ -1763,6 +1989,13 @@ class CockpitApp(App):
         Binding("p", "prune_images", "Prune", show=False),
         # Estate · Containers / Validate — context-sensitive read keys.
         Binding("t", "context_t", "Top / Sort", show=False),
+        # Phase 5 — the three v2 hooks:
+        #   [v] Estate · evaluate the running target via c3t (confirm-gated, mock-only)
+        #   [P] Discover · promote the BYO model to the catalog (scaffold + gated write)
+        #   [O] Discover/Serve · optimize for my card (dormant v0.10.0 seam)
+        Binding("v", "evaluate_target", "Evaluate", show=False),
+        Binding("P", "promote_catalog", "Promote", show=False),
+        Binding("O", "optimize_card", "Optimize", show=False),
     ]
 
     CSS = """
@@ -1813,6 +2046,13 @@ class CockpitApp(App):
         self._target_slug: str = ""
         self._target_model: str = ""
         self._target_url: str = ""
+        # Phase 5: the SHARED ServingTarget OBJECT from the last estate poll —
+        # held by identity so the c3t Evaluate hand-off passes the SAME dataclass
+        # instance c3t speaks (design §4/§6.6), not a reconstructed copy.
+        self._target_obj = None
+        # Phase 5: the last BYO fit-check result (Discover · BYO) — the arch facts
+        # the Promote-to-catalog scaffold computes from.
+        self._last_byo: Optional[ByoResult] = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -1887,6 +2127,9 @@ class CockpitApp(App):
         tgt = state.target
         self._target_model = getattr(tgt, "model", "") or ""
         self._target_url = getattr(tgt, "url", "") or ""
+        # Hold the SHARED ServingTarget object (by identity) for the c3t Evaluate
+        # hand-off — design §4/§6.6 requires passing the SAME dataclass instance.
+        self._target_obj = tgt
         try:
             self.query_one("#estate-orch-pane", EstateOrchPane).populate(state)
         except Exception:
@@ -1950,6 +2193,8 @@ class CockpitApp(App):
         pane = self.query_one("#byo-panel", ByoPane)
         pane.set_checking(repo)
         res = await self._data.byo_check(repo, profile_like)
+        # Cache the arch facts for the Promote-to-catalog scaffold (Phase 5).
+        self._last_byo = res
         pane.populate(res)
 
     # ── Explain ──────────────────────────────────────────────────────────────────────
@@ -1968,7 +2213,22 @@ class CockpitApp(App):
     async def run_reconcile_for_modal(self, screen: ConfirmActionScreen, plan: ActionPlan) -> None:
         """Re-run the FRESH reconcile gate for a pending write, push verdict back
         into the confirm modal.  Pending GPUs are inferred from the plan kind
-        (None = conservative both-cards for a serve/scene)."""
+        (None = conservative both-cards for a serve/scene).
+
+        A plan that does NOT claim a GPU (``requires_reconcile=False`` — a
+        validation launch, the c3t Evaluate hand-off, submit-bench, power-cap,
+        prune, the promote write) is reported trivially-safe: the reconcile gate
+        only models GPU contention, and these actions legitimately run WHILE a
+        model is serving (busy GPUs are EXPECTED — gating Evaluate on 'GPU free'
+        would wrongly disable it against the very target it evaluates).  These
+        still go through the confirm modal (``requires_confirm``), just not the
+        GPU gate."""
+        if not plan.requires_reconcile:
+            try:
+                screen.set_reconcile(ReconcileResult(safe=True, action=f"{plan.kind}:{plan.description}"))
+            except Exception:
+                pass
+            return
         pending = self._pending_gpus_for(plan)
         rec = await self._data.reconcile_before_write(
             f"{plan.kind}:{plan.description}",
@@ -2507,6 +2767,141 @@ class CockpitApp(App):
             return
         plan = self._data.estate_down()
         self.push_screen(ConfirmActionScreen(plan))
+
+    # ── Phase 5 · Hook 1: Evaluate the running target via c3t (design §4) ──────────────
+
+    def action_evaluate_target(self) -> None:
+        """[v] in Estate: hand the SHARED ServingTarget to c3t (▸ Evaluate).
+
+        Confirm-gated, MOCK-ONLY launch — c3t runs the post-boot evaluator
+        against the live serving model (heavy).  The hand-off carries the SAME
+        ``ServingTarget`` object the Estate poll detected (design §4/§6.6); the
+        launch streams via ``launch_evaluate`` (write runner, NEVER live this
+        phase — conftest blocks the spawn, tests fake it)."""
+        if self._active_mode != 2:
+            return
+        handoff = self._data.evaluate_handoff(self._target_obj)
+        if not handoff.available:
+            self.notify(
+                f"Evaluate: {handoff.reason}",
+                title="Evaluate",
+                severity="warning",
+                timeout=4,
+            )
+            return
+        # Confirm-gated; the commit launches c3t scoped to the shared target.
+        self.push_screen(
+            ConfirmActionScreen(
+                handoff.plan,
+                on_confirm=lambda _p: self.launch_c3t_evaluate(),
+            )
+        )
+
+    @work(exclusive=True, group="evaluate")
+    async def launch_c3t_evaluate(self) -> None:
+        """Launch c3t scoped to the SHARED ServingTarget, streamed (MOCK-ONLY).
+
+        ⚠️  WIRED-BUT-MOCK-ONLY.  c3t runs tests against the live serving model;
+        the write runner is NEVER executed live this phase (conftest blocks the
+        spawn; tests inject a FakeWriteRunner).  The SAME ``ServingTarget`` the
+        Estate poll captured is passed by identity so c3t evaluates exactly what
+        is running."""
+        live = self._serve_live_pane()
+        if live is not None:
+            tgt = self._target_obj
+            label = getattr(tgt, "model", "") or getattr(tgt, "url", "") or "target"
+            live.append_line(f"[green]▶ c3t evaluate[/green] {label} (mock-only this phase)")
+
+        def _on_line(text: str) -> None:
+            if live is not None:
+                live.append_line(text)
+
+        await self._data.launch_evaluate(self._target_obj, on_line=_on_line)
+        self.notify("c3t evaluate launched.", title="Evaluate", severity="information", timeout=4)
+
+    # ── Phase 5 · Hook 2: Promote the BYO model to the catalog (design §3.5b) ──────────
+
+    def action_promote_catalog(self) -> None:
+        """[P] in Discover: compute + preview the catalog-promotion scaffold.
+
+        Design §3.5b — a SCAFFOLD + GATE, not a YAML IDE.  Computes a ModelProfile
+        YAML skeleton + a compose_registry row from the last BYO fit-check arch
+        facts + any measured Evidence numbers, and previews them.  The write into
+        scripts/ + the guard suite is the GATED write_plan on the scaffold —
+        MOCK-ONLY this phase, never auto-fired."""
+        if self._active_mode != 0:
+            return
+        if self._last_byo is None:
+            self.notify(
+                "No BYO model to promote — run a fit-check in Discover · BYO first.",
+                title="Promote",
+                severity="warning",
+                timeout=4,
+            )
+            return
+        meas = self._measurement_for_promote()
+        scaffold = self._data.promote_scaffold(byo=self._last_byo, measurement=meas)
+        if not scaffold.computed:
+            self.notify(
+                f"Cannot scaffold: {scaffold.error or 'incomplete BYO facts'}",
+                title="Promote",
+                severity="warning",
+                timeout=5,
+            )
+            return
+        # Preview only — the gated write routes through the same confirm gate
+        # (mock-only), never auto-fires.
+        self.push_screen(
+            PromoteScaffoldScreen(
+                scaffold,
+                on_stage_write=lambda plan: self.push_screen(ConfirmActionScreen(plan)),
+            )
+        )
+
+    def _measurement_for_promote(self) -> Optional[Measurement]:
+        """Best-effort Evidence measurement for the Promote scaffold: the matched
+        catalog entry's measurement (e.g. when a Route-C sibling already serves),
+        else None.  Pure local lookup — no I/O."""
+        sib = getattr(self._last_byo, "sibling_slug", "") if self._last_byo else ""
+        if not sib:
+            return None
+        try:
+            pane = self.query_one("#catalog-pane", CatalogPane)
+        except Exception:
+            return None
+        for e in getattr(pane, "_entries", []) or []:
+            if e.slug == sib:
+                return e.measurement
+        return None
+
+    # ── Phase 5 · Hook 3: Optimize for my card (DORMANT v0.10.0 seam) ──────────────────
+
+    def action_optimize_card(self) -> None:
+        """[O] in Discover/Serve: open the (dormant) per-card optimizer seam.
+
+        The v0.10.0 optimizer does not exist yet — the modal shows 'optimizer not
+        available (v0.10.0)'.  Available from Discover · Catalog (selected slug)
+        and Serve (staged slug)."""
+        if self._active_mode not in (0, 1):
+            return
+        slug = ""
+        if self._active_mode == 0:
+            entry = self._selected_catalog_entry()
+            slug = entry.slug if entry else ""
+        elif self._staged_entry is not None:
+            slug = self._staged_entry.slug
+        self.push_screen(OptimizeScreen(slug))
+
+    @work(group="optimize")
+    async def run_optimize_for_modal(self, screen: OptimizeScreen, slug: str) -> None:
+        """Invoke the dormant optimizer seam + push the verdict into the modal.
+        Detects the optimizer's absence → 'not available (v0.10.0)'; never
+        fabricates output."""
+        report = await self._data.optimize_for_card(slug=slug)
+        try:
+            screen.set_report(report)
+        except Exception:
+            pass
 
     # ── Widget event handlers ─────────────────────────────────────────────────────────
 

@@ -1497,3 +1497,233 @@ class TestValidateNoLiveWriteOrNetwork:
             assert all("--auto-submit" not in " ".join(c) for c in runner.calls)
             assert all("power-cap on" not in " ".join(c) and "power-cap off" not in " ".join(c)
                        for c in runner.calls)
+
+
+# ===========================================================================
+# PHASE 5 — the three v2 hooks (app wiring)
+# ===========================================================================
+
+
+from club3090_cockpit.app import PromoteScaffoldScreen, OptimizeScreen  # noqa: E402
+
+
+SERVING_TARGET = ServingTarget(
+    url="http://localhost:8010",
+    model="qwen3.6-27b",
+    container="vllm-qwen36-27b-dual",
+    slug="vllm/dual",
+    gpus=[GpuInfo(index=0, mem_used_mib=22000), GpuInfo(index=1, mem_used_mib=22000)],
+)
+
+
+class TestEvaluateHookWired:
+    """Hook 1 — Estate → ▸ Evaluate (c3t hand-off, confirm-gated, MOCK-ONLY)."""
+
+    @pytest.mark.asyncio
+    async def test_evaluate_opens_confirm_when_target_running(self):
+        app, _, _ = make_app(target=SERVING_TARGET,
+                             gpus=list(SERVING_TARGET.gpus))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("3")          # Estate — poll captures the target
+            await _settle(pilot)
+            await pilot.press("v")          # ▸ Evaluate
+            await pilot.pause()
+            assert isinstance(app.screen, ConfirmActionScreen)
+            assert app.screen._plan.kind == "evaluate"
+            assert app.screen._plan.cmd == ["bash", "scripts/c3t"]
+            assert app.screen._plan.requires_reconcile is False
+            assert app.screen._plan.requires_confirm is True
+
+    @pytest.mark.asyncio
+    async def test_evaluate_hands_off_the_shared_serving_target_by_identity(self):
+        """The app's stored target IS the SAME ServingTarget the poll detected,
+        and the hand-off carries that exact object (design §4/§6.6)."""
+        app, _, _ = make_app(target=SERVING_TARGET, gpus=list(SERVING_TARGET.gpus))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("3")
+            await _settle(pilot)
+            assert app._target_obj is SERVING_TARGET
+            handoff = app._data.evaluate_handoff(app._target_obj)
+            assert handoff.target is SERVING_TARGET     # same dataclass instance
+            # And it is the shared-core dataclass, not a cockpit-local type.
+            from club3090_tui_core.detect import ServingTarget as CoreTarget
+            assert isinstance(handoff.target, CoreTarget)
+
+    @pytest.mark.asyncio
+    async def test_evaluate_confirm_launches_mock_only_scoped_to_target(self):
+        wr = FakeWriteRunner()
+        app, _, _ = make_app(target=SERVING_TARGET, gpus=list(SERVING_TARGET.gpus),
+                             write_runner=wr)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("3")
+            await _settle(pilot)
+            await pilot.press("v")
+            await _settle(pilot)
+            screen = app.screen
+            assert isinstance(screen, ConfirmActionScreen)
+            screen.query_one("#confirm-ok-btn", Button).press()
+            await _settle(pilot)
+            # c3t launched via the MOCKED write runner — never live.
+            assert len(wr.started) == 1
+            assert wr.started[0]["cmd"] == ["bash", "scripts/c3t"]
+            assert wr.started[0]["run_type"] == "evaluate"
+
+    @pytest.mark.asyncio
+    async def test_evaluate_no_target_notifies_and_does_not_launch(self):
+        wr = FakeWriteRunner()
+        # No serving target (empty url) → nothing to evaluate.
+        app, _, _ = make_app(target=ServingTarget(), write_runner=wr)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("3")
+            await _settle(pilot)
+            await pilot.press("v")
+            await pilot.pause()
+            assert not isinstance(app.screen, ConfirmActionScreen)
+            assert wr.started == []          # never launched
+
+
+class TestPromoteHookWired:
+    """Hook 2 — Discover → ▸ Promote to catalog (scaffold preview + gated write)."""
+
+    @pytest.mark.asyncio
+    async def test_promote_without_byo_notifies(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            # No BYO fit-check yet → nothing to promote.
+            await pilot.press("P")
+            await pilot.pause()
+            assert not isinstance(app.screen, PromoteScaffoldScreen)
+
+    @pytest.mark.asyncio
+    async def test_promote_previews_scaffold_after_byo_check(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            # Run a BYO fit-check (Discover · BYO) — fills the arch facts.
+            app.run_byo_check("unsloth/Qwen3-27B-abliterated", "vllm/dual")
+            await _settle(pilot)
+            assert app._last_byo is not None
+            await pilot.press("P")          # ▸ Promote to catalog
+            await pilot.pause()
+            assert isinstance(app.screen, PromoteScaffoldScreen)
+            body = str(app.screen.query_one("#promote-body", Static).render())
+            assert "schema_version: 1" in body
+            assert "_entry(" in body
+            assert "incubating" in body
+            assert "scripts/tests/*.sh" in body   # the gated guard suite
+
+    @pytest.mark.asyncio
+    async def test_promote_stage_write_is_gated_mock_only(self):
+        """Staging the write opens the standard confirm gate; the plan is
+        mock-only and writes nothing into scripts/ (no auto-fire)."""
+        wr = FakeWriteRunner()
+        app, _, _ = make_app(write_runner=wr)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            app.run_byo_check("unsloth/Qwen3-27B-abliterated", "vllm/dual")
+            await _settle(pilot)
+            await pilot.press("P")
+            await pilot.pause()
+            assert isinstance(app.screen, PromoteScaffoldScreen)
+            # Stage the gated write — routes through ConfirmActionScreen.
+            app.screen.query_one("#promote-stage-btn", Button).press()
+            await pilot.pause()
+            assert isinstance(app.screen, ConfirmActionScreen)
+            assert app.screen._plan.kind == "promote_catalog"
+            assert app.screen._plan.requires_confirm is True
+            # Nothing executed yet — the write is mock-only and never auto-fired.
+            assert wr.started == []
+
+    @pytest.mark.asyncio
+    async def test_promote_write_dispatch_reaches_only_mock_runner(self):
+        """Even when explicitly dispatched, the promote write reaches ONLY the
+        mocked write runner (never a live scripts/ write — conftest blocks it)."""
+        wr = FakeWriteRunner()
+        app, _, _ = make_app(write_runner=wr)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            app.run_byo_check("unsloth/Qwen3-27B-abliterated", "vllm/dual")
+            await _settle(pilot)
+            sc = app._data.promote_scaffold(byo=app._last_byo)
+            app.dispatch_action(sc.write_plan)
+            await _settle(pilot)
+            assert len(wr.started) == 1
+            assert "scripts/tests/*.sh" in " ".join(wr.started[0]["cmd"])
+
+
+class TestOptimizeHookWired:
+    """Hook 3 — ▸ Optimize for my card: DORMANT v0.10.0 seam (no-op)."""
+
+    @pytest.mark.asyncio
+    async def test_optimize_shows_not_available_message(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            # From Discover · Catalog with a selected slug.
+            app.query_one("#catalog-table", DataTable).move_cursor(row=0)
+            await pilot.press("O")          # ▸ Optimize for my card
+            await _settle(pilot)
+            assert isinstance(app.screen, OptimizeScreen)
+            body = str(app.screen.query_one("#optimize-body", Static).render())
+            assert "optimizer not available (v0.10.0)" in body
+
+    @pytest.mark.asyncio
+    async def test_optimize_is_a_noop_no_write(self):
+        wr = FakeWriteRunner()
+        app, _, _ = make_app(write_runner=wr)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            app.query_one("#catalog-table", DataTable).move_cursor(row=0)
+            await pilot.press("O")
+            await _settle(pilot)
+            # A no-op seam: a modal, but never a write / launch.
+            assert isinstance(app.screen, OptimizeScreen)
+            assert wr.started == []
+
+    @pytest.mark.asyncio
+    async def test_optimize_available_from_serve_staged_slug(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            # Stage a slug into Serve, then open the optimizer from there.
+            app.query_one("#catalog-table", DataTable).move_cursor(row=0)
+            await pilot.press("enter")      # → stages + jumps to Serve
+            await pilot.pause()
+            await pilot.press("O")
+            await _settle(pilot)
+            assert isinstance(app.screen, OptimizeScreen)
+            body = str(app.screen.query_one("#optimize-body", Static).render())
+            assert "v0.10.0" in body
+
+
+class TestPhase5NoLiveEffect:
+    """Belt-and-suspenders: the three hooks never write live / auto-fire."""
+
+    @pytest.mark.asyncio
+    async def test_browsing_all_three_hooks_touches_only_fakes(self):
+        wr = FakeWriteRunner()
+        app, runner, _ = make_app(target=SERVING_TARGET, gpus=list(SERVING_TARGET.gpus),
+                                  write_runner=wr)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            # Optimize (Discover) — dormant no-op.
+            app.query_one("#catalog-table", DataTable).move_cursor(row=0)
+            await pilot.press("O")
+            await pilot.pause()
+            await pilot.press("escape")
+            # Promote (Discover) after a BYO check — preview only.
+            app.run_byo_check("unsloth/Qwen3-27B-abliterated", "vllm/dual")
+            await _settle(pilot)
+            await pilot.press("P")
+            await pilot.pause()
+            await pilot.press("escape")
+            # Evaluate (Estate) — confirm modal staged, not committed.
+            await pilot.press("3")
+            await _settle(pilot)
+            await pilot.press("v")
+            await pilot.pause()
+            await pilot.press("escape")
+            # Nothing was launched / written; no c3t, no guard suite, no scripts/.
+            assert wr.started == []
+            assert all("scripts/c3t" not in " ".join(c) for c in runner.calls)

@@ -2216,3 +2216,184 @@ class TestPhase4GatedWriteExecution:
         assert executed is True and rec is None  # no reconcile
         assert len(write_runner.started) == 1
         assert "--auto-submit" in write_runner.started[0]["cmd"]
+
+
+# ===========================================================================
+# PHASE 5 — the three v2 hooks (service layer)
+# ===========================================================================
+
+
+class EnvCapturingWriteRunner:
+    """Like FakeWriteRunner but ALSO captures the child env + supports
+    set_callbacks (the c3t launch wires the live-stream callbacks)."""
+
+    def __init__(self):
+        self.started: list[dict[str, Any]] = []
+        self.callbacks: dict[str, Any] = {}
+
+    def set_callbacks(self, on_event=None, on_line=None, on_complete=None):
+        self.callbacks = {"on_event": on_event, "on_line": on_line}
+
+    async def start_raw(self, cmd, env, run_type, parser):
+        self.started.append({"cmd": cmd, "run_type": run_type, "env": dict(env)})
+        return {"mock_state": True, "cmd": cmd}
+
+
+class TestEvaluateHandoff:
+    """Hook 1 — Estate → ▸ Evaluate hands the SHARED ServingTarget to c3t."""
+
+    def test_handoff_carries_the_same_serving_target_by_identity(self):
+        cd = CockpitData(ROOT, runner=full_runner())
+        tgt = ServingTarget(url="http://localhost:8010", model="qwen3.6-27b", container="vllm-x")
+        handoff = cd.evaluate_handoff(tgt)
+        # The hand-off must carry the SAME dataclass instance (design §4/§6.6).
+        assert handoff.target is tgt
+        assert handoff.available is True
+        assert handoff.plan.kind == "evaluate"
+        assert handoff.plan.requires_confirm is True
+        assert handoff.plan.requires_reconcile is False     # c3t hits endpoint, no GPU claim
+        assert handoff.plan.cmd == ["bash", "scripts/c3t"]
+
+    def test_serving_target_is_the_shared_core_dataclass(self):
+        """The cockpit + c3t both speak club3090_tui_core.detect.ServingTarget —
+        the hand-off type IS that shared dataclass (not a cockpit-local copy)."""
+        from club3090_tui_core.detect import ServingTarget as CoreTarget
+        import club3090_cockpit.services as svc
+        assert svc.ServingTarget is CoreTarget
+
+    def test_handoff_unavailable_when_no_running_target(self):
+        cd = CockpitData(ROOT, runner=full_runner())
+        handoff = cd.evaluate_handoff(None)
+        assert handoff.available is False
+        assert "no running" in handoff.reason.lower()
+        # Even unavailable, the plan exists (confirm-gated) but nothing launches.
+        assert handoff.plan.requires_confirm is True
+
+    @pytest.mark.asyncio
+    async def test_launch_evaluate_is_mock_only_and_scopes_to_target(self):
+        """Launch streams via the MOCKED write runner (never live — conftest
+        blocks the spawn) and scopes c3t to the SAME target via the child env."""
+        wr = EnvCapturingWriteRunner()
+        cd = CockpitData(ROOT, runner=full_runner(), write_runner=wr)
+        tgt = ServingTarget(
+            url="http://localhost:8010", model="qwen3.6-27b",
+            container="vllm-qwen", slug="vllm/dual",
+        )
+        await cd.launch_evaluate(tgt)
+        assert len(wr.started) == 1
+        rec = wr.started[0]
+        assert rec["cmd"] == ["bash", "scripts/c3t"]
+        assert rec["run_type"] == "evaluate"
+        # c3t is scoped to the SAME running target via env (it preselects it).
+        env = rec["env"]
+        assert env["C3T_TARGET_URL"] == "http://localhost:8010"
+        assert env["C3T_TARGET_MODEL"] == "qwen3.6-27b"
+        assert env["C3T_TARGET_CONTAINER"] == "vllm-qwen"
+        assert env["C3T_TARGET_SLUG"] == "vllm/dual"
+        assert env["C3T_REPO_ROOT"] == str(ROOT)
+
+
+class TestPromoteScaffold:
+    """Hook 2 — Discover → ▸ Promote to catalog: COMPUTE + PREVIEW only."""
+
+    def _byo(self, **over) -> ByoResult:
+        base = dict(
+            repo="unsloth/Qwen3-27B-abliterated", profile_like="vllm/dual",
+            arch="Qwen3ForCausalLM", eligible=True, fit_verdict="fits-clean",
+            route="C", sibling_slug="vllm/dual", quant_match="int4",
+            drop_spec_config=True,
+        )
+        base.update(over)
+        return ByoResult(**base)
+
+    def test_scaffold_computes_real_profile_and_registry_shapes(self):
+        cd = CockpitData(ROOT, runner=full_runner())
+        meas = Measurement(narr_tps=174.0, code_tps=42.0, quality_8pk="109/150", source="explain")
+        sc = cd.promote_scaffold(byo=self._byo(), measurement=meas)
+        assert sc.computed is True
+        # ModelProfile YAML — REAL schema keys (ADDING_MODELS.md).
+        assert "schema_version: 1" in sc.profile_yaml
+        assert sc.profile_yaml.startswith("schema_version: 1\n")
+        assert "\nweights:\n" in sc.profile_yaml            # weights MAP, not a list
+        assert "vision_capable:" in sc.profile_yaml
+        assert sc.profile_path.startswith("scripts/lib/profiles/models/")
+        # compose_registry _entry(...) row — REAL kwargs.
+        for kw in ("model=", "weights_variant=", "workload=", "engine=",
+                   "drafter=", "kv_format=", "tp=", "compose_path=",
+                   "default_port=", "kvcalc_key=", "status="):
+            assert kw in sc.registry_entry, kw
+        assert "_entry(" in sc.registry_entry
+        # New models START at incubating (ADDING_MODELS.md rule).
+        assert 'status="incubating"' in sc.registry_entry
+        # Measured Evidence numbers flow into the status_note.
+        assert "8-pack 109/150" in sc.registry_entry
+
+    def test_scaffold_drops_drafter_when_byo_has_no_mtp_head(self):
+        cd = CockpitData(ROOT, runner=full_runner())
+        sc = cd.promote_scaffold(byo=self._byo(drop_spec_config=True))
+        assert "drafter=None" in sc.registry_entry
+
+    def test_scaffold_write_plan_is_gated_mock_only(self):
+        cd = CockpitData(ROOT, runner=full_runner())
+        sc = cd.promote_scaffold(byo=self._byo())
+        plan = sc.write_plan
+        assert plan is not None
+        assert plan.kind == "promote_catalog"
+        assert plan.requires_confirm is True
+        assert plan.requires_reconcile is False
+        # The gated action runs the guard suite; it does NOT auto-write scripts/.
+        assert plan.cmd[:2] == ["bash", "-c"]
+        assert "scripts/tests/*.sh" in " ".join(plan.cmd)
+
+    @pytest.mark.asyncio
+    async def test_promote_does_not_write_into_scripts_dir(self, tmp_path):
+        """Computing + previewing the scaffold touches NO files under scripts/.
+        The write is gated/mock-only and never auto-fires."""
+        # Seed a scripts/ tree to detect any accidental write.
+        scripts = tmp_path / "scripts" / "lib" / "profiles" / "models"
+        scripts.mkdir(parents=True)
+        before = sorted(p.name for p in scripts.iterdir())
+        cd = CockpitData(tmp_path, runner=full_runner())
+        sc = cd.promote_scaffold(byo=self._byo())
+        assert sc.computed
+        # No file was created under scripts/lib/profiles/models/ (preview only).
+        after = sorted(p.name for p in scripts.iterdir())
+        assert after == before == []
+        # And the proposed profile path was NOT materialized.
+        assert not (tmp_path / sc.profile_path).exists()
+
+    def test_scaffold_errors_propagate_not_fabricated(self):
+        cd = CockpitData(ROOT, runner=full_runner())
+        bad = ByoResult(repo="x/Y", profile_like="vllm/dual", error="arch not eligible")
+        sc = cd.promote_scaffold(byo=bad)
+        assert sc.computed is False
+        assert "arch not eligible" in sc.error
+        assert sc.write_plan is None             # nothing to stage on a failed scaffold
+
+
+class TestOptimizeSeam:
+    """Hook 3 — ▸ Optimize for my card: DORMANT v0.10.0 seam (no-op)."""
+
+    @pytest.mark.asyncio
+    async def test_optimizer_is_not_available_v0_10_0(self):
+        cd = CockpitData(ROOT, runner=full_runner())
+        report = await cd.optimize_for_card(slug="vllm/dual")
+        assert report.available is False
+        assert report.message == "optimizer not available (v0.10.0)"
+        # No fabricated recommendation / honesty gates while dormant.
+        assert report.recommended_slug == ""
+        assert report.boot_fit == "" and report.runtime == ""
+        assert report.confidence == ""
+        assert report.accept_runtime_risk_required is False
+
+    @pytest.mark.asyncio
+    async def test_optimizer_does_not_fabricate_even_if_probe_errors(self):
+        """A probe error keeps the seam honestly dormant (never invents output)."""
+        async def boom(cmd, *, cwd, timeout=30.0):
+            raise RuntimeError("no such script")
+        runner = full_runner()
+        runner.run = boom  # type: ignore[assignment]
+        cd = CockpitData(ROOT, runner=runner)
+        report = await cd.optimize_for_card()
+        assert report.available is False
+        assert "v0.10.0" in report.message
