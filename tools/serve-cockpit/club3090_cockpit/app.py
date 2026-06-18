@@ -187,6 +187,15 @@ MODES = [
     ("Validate", "4"),
 ]
 
+# Per-mode primary action (what ⏎ will do in Phase 3), by mode index.
+PRIMARY_ACTIONS = ["Serve", "Launch", "Switch scene", "Run"]
+PRIMARY_ACTION_TOASTS = [
+    "Serve the selected slug",
+    "Launch via switch.sh <slug>",
+    "Switch scene / inspect container",
+    "Run the selected check",
+]
+
 
 class ModeSwitcher(Static):
     """Left-rail mode selector.  Purely cosmetic in Phase 1 — navigation is
@@ -194,7 +203,7 @@ class ModeSwitcher(Static):
 
     DEFAULT_CSS = """
     ModeSwitcher {
-        width: 16;
+        width: 20;
         height: auto;
         border: solid $primary;
         padding: 0 1;
@@ -211,6 +220,10 @@ class ModeSwitcher(Static):
         color: $accent;
         text-style: bold;
     }
+    ModeSwitcher .mode-action-hint {
+        color: $text-muted;
+        margin-top: 1;
+    }
     """
 
     def __init__(self, **kwargs):
@@ -223,6 +236,9 @@ class ModeSwitcher(Static):
             classes = "mode-item-active" if i == 0 else "mode-item"
             yield Label(f"▸ {name} [{digit}]" if i == 0 else f"  {name} [{digit}]",
                         id=f"mode-{i}", classes=classes)
+        # Per-mode primary-action hint — always shows what ⏎ does on this screen.
+        yield Label(f"⏎ {PRIMARY_ACTIONS[0]}", id="mode-action-hint",
+                    classes="mode-action-hint")
 
     def set_active(self, index: int) -> None:
         """Update the visual highlight for the active mode."""
@@ -240,6 +256,12 @@ class ModeSwitcher(Static):
                     lbl.update(f"  {name} [{digit}]")
             except Exception:
                 pass
+        try:
+            self.query_one("#mode-action-hint", Label).update(
+                f"⏎ {PRIMARY_ACTIONS[index]}"
+            )
+        except Exception:
+            pass
 
 
 # ── Main application ──────────────────────────────────────────────────────────
@@ -259,7 +281,7 @@ class CockpitApp(App):
         Binding("2", "mode_serve", "Serve", show=True),
         Binding("3", "mode_estate", "Estate", show=True),
         Binding("4", "mode_validate", "Validate", show=True),
-        Binding("enter", "primary_action", "Action", show=True),
+        Binding("enter", "primary_action", "Select", show=True),
     ]
 
     CSS = """
@@ -499,10 +521,12 @@ class CockpitApp(App):
         self._load_catalog()
 
     def action_primary_action(self) -> None:
-        """⏎ primary action — no-op in Phase 1, pops an informational toast."""
+        """⏎ primary action — context-specific per mode; no-op in Phase 1
+        (every row/scene/container action is wired in Phase 3)."""
+        idx = self._active_mode if 0 <= self._active_mode < len(PRIMARY_ACTION_TOASTS) else 0
         self.notify(
-            "Action not wired yet — all row/scene/container actions are wired in Phase 3.",
-            title="Wired in Phase 3",
+            f"⏎ would {PRIMARY_ACTION_TOASTS[idx]} — wired in Phase 3.",
+            title=f"Phase 3 · {PRIMARY_ACTIONS[idx]}",
             severity="information",
             timeout=4,
         )
