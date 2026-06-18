@@ -1427,3 +1427,792 @@ class TestExplainScreenBenchmarkShape:
         assert "42" in line
         assert "109/150" in line
         assert "None" not in line
+
+
+# ===========================================================================
+# PHASE 4 — REAL-shaped fixtures (captured live; see the wiring notes inline)
+# ===========================================================================
+
+# diagnose-estate.sh --json — REAL shape (verified live 2026-06-18).
+ESTATE_DIAGNOSE_GREEN = json.dumps(
+    {
+        "estate_file": "/home/x/.club3090/estate.yml",
+        "live": False,
+        "checks": {
+            "schema": {"ok": True, "schema_version": 1, "instance_count": 2},
+            "registry": {"ok": True, "missing": [], "composes": ["llamacpp/default", "llamacpp/default"]},
+            "per_instance_fits": [
+                {"name": "llama-gpu0", "valid": True, "constraints_passed": 15, "constraints_failed": 0},
+                {"name": "llama-gpu1", "valid": True, "constraints_passed": 15, "constraints_failed": 0},
+            ],
+            "cross_checks": {"ok": True, "failures": [], "constraints_passed": ["E1", "E2", "E3", "E4"]},
+            "calibration": [
+                {"name": "llama-gpu0", "status": "predicted", "has_row": False, "source": None},
+                {"name": "llama-gpu1", "status": "predicted", "has_row": False, "source": None},
+            ],
+            "live": {"checked": False, "instances": []},
+        },
+        "valid": True,
+        "summary": "GREEN",
+    }
+)
+
+ESTATE_DIAGNOSE_RED = json.dumps(
+    {
+        "estate_file": "/home/x/.club3090/estate.yml",
+        "live": False,
+        "checks": {
+            "schema": {"ok": True, "schema_version": 1, "instance_count": 2},
+            "per_instance_fits": [
+                {"name": "a", "valid": True},
+                {"name": "b", "valid": False, "reasons": ["wont fit"]},
+            ],
+            "cross_checks": {"ok": False, "failures": ["E2 overlap"]},
+        },
+        "valid": False,
+        "summary": "RED",
+    }
+)
+
+# diagnose-profile.sh <slug> — REAL text output (verified live, vllm/dual GREEN).
+PROFILE_TRIAGE_GREEN = (
+    "Profile triage: vllm/dual\n"
+    "=========================\n"
+    "[1/6] Compose registry entry exists\n"
+    "  ✓ vllm/dual found (model=qwen3.6-27b, workload=long-ctx-single, engine=vllm-stable)\n"
+    "\n"
+    "[2/6] Cross-references resolve\n"
+    "  ✓ all referenced profiles exist (model, workload, engine, drafter, hardware-default=2x-rtx-3090-pcie)\n"
+    "\n"
+    "[3/6] fits() on canonical 2x-rtx-3090-pcie scenario\n"
+    "  ✓ valid=true; constraints passed: 15/16; elapsed 0.03 ms\n"
+    "  note: KV projection skipped because project_vram=false\n"
+    "\n"
+    "[4/6] kv-calc projection\n"
+    "  ✓ predicted total 19.88 GB/card (90.04% budget), verdict PASS; budget 22.08 GB\n"
+    "\n"
+    "[5/6] Calibration freshness\n"
+    "  ✓ verified; BENCHMARKS.md#qwen36-27b dual.yml @noonghunna 2026-04-29\n"
+    "\n"
+    "[6/6] Vendored overlays applied\n"
+    "  ✓ required_overlays: []\n"
+    "  ✓ vendored_overlays: []\n"
+    "  ✓ Genesis: not required\n"
+    "  ✓ VLLM_IMAGE resolves: vllm/vllm-openai:v0.22.0\n"
+    "\n"
+    "Triage summary: GREEN\n"
+)
+
+# REAL YELLOW output (verified live): ⊘ glyphs on skipped + kv-FAIL steps.
+PROFILE_TRIAGE_YELLOW = (
+    "[1/6] Compose registry entry exists\n"
+    "  ⊘ free-form combo; compose registry lookup skipped\n"
+    "\n"
+    "[2/6] Cross-references resolve\n"
+    "  ✓ all referenced profiles exist (model, workload, engine, hardware-default=1x-rtx-3060-12gb)\n"
+    "\n"
+    "[3/6] fits() on canonical 1x-rtx-3060-12gb scenario\n"
+    "  ✓ valid=true; constraints passed: 15/16; elapsed 0.027 ms\n"
+    "  note: KV projection skipped because project_vram=false\n"
+    "\n"
+    "[4/6] kv-calc projection\n"
+    "  ⊘ predicted total 20.51 GB/card (194.27% budget), verdict FAIL\n"
+    "  note: kv-calc: fixed components (20.5 GB) leave only 0.00 GB for KV\n"
+    "\n"
+    "[5/6] Calibration freshness\n"
+    "  ⊘ free-form combo; no exact compose calibration row\n"
+    "\n"
+    "[6/6] Vendored overlays applied\n"
+    "  ✓ required_overlays: []\n"
+    "  ✓ VLLM_IMAGE resolves: vllm/vllm-openai:v0.22.0\n"
+    "\n"
+    "Triage summary: YELLOW\n"
+)
+
+# gpu-mode power-cap status — REAL output (verified live; ANSI banner + table).
+POWER_CAP_STATUS = (
+    "\x1b[0;36m═══ GPU Power Limits ═══\x1b[0m\n"
+    "index, power.limit [W], power.default_limit [W], power.min_limit [W], power.max_limit [W]\n"
+    "0, 370.00 W, 370.00 W, 100.00 W, 390.00 W\n"
+    "1, 420.00 W, 420.00 W, 100.00 W, 450.00 W\n"
+)
+
+# docker top — REAL ps-style table.
+DOCKER_TOP = (
+    "UID                 PID                 PPID                C                   STIME               TTY                 TIME                CMD\n"
+    "root                12345               12300               4                   10:00               ?                   00:05:01            python3 -m vllm.entrypoints.openai.api_server --model x\n"
+)
+
+# #249 measurement-record corpus line — REAL frozen-schema shape (verified live
+# via scripts/lib/profiles/measurement_record.py --print-only). Bench-only record
+# → carries decode_tps_by_ctx + wall_tps but NO 8-pack.
+CORPUS_RECORD = {
+    "model_slug": "qwen3.6-27b",
+    "arch": "qwen3-next-hybrid",
+    "arch_class": "deltanet-hybrid",
+    "engine_id": "vllm-stable",
+    "engine_pin": None,
+    "hardware": "rtx-3090",
+    "topology": "dual",
+    "kv_dtype": "fp8_e5m2",
+    "max_model_len": 262144,
+    "max_num_seqs": 2,
+    "mem_util": 0.92,
+    "result_class": "boot-fit-measured",
+    "provenance": {"source": "measured", "n_obs": 1, "last_confirmed": "2026-06-16"},
+    "measured_extensions": {
+        "decode_tps_by_ctx": {"canonical-short": 44.02},
+        "prefill_tps": 1196.62,
+        "ttft_s": 11.014,
+        "wall_tps": 43.81,
+        "peak_vram_mib_by_gpu": {"0": 21842, "1": 21228},
+        "power_cap_w": 370.0,
+        "conditions_fingerprint": {"hardware": "rtx-3090", "kv_dtype": "fp8_e5m2", "topology": "dual"},
+    },
+    "_tag": "vllm/dual",
+}
+
+# REAL BENCHMARKS.md fragment (canonical 9-col table under model + topo headers).
+BENCH_MD = (
+    "## Qwen3.6-27B\n"
+    "\n"
+    "### Single-card (1× RTX 3090) — vLLM\n"
+    "\n"
+    "| Compose | Rig | KV | Max ctx | Narr / Code TPS | PP tok/s | Peak VRAM | Date | Notes |\n"
+    "| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |\n"
+    "| `minimal.yml` (single) | @x (1× 3090) | TQ3 | 64K | ~32 / ~33 | — | ~22.4 GB | 2026-05-03 | no MTP |\n"
+    "\n"
+    "### Dual-card (2× RTX 3090, TP=2)\n"
+    "\n"
+    "| Compose | Rig | KV | Max ctx | Narr / Code TPS | PP tok/s | Peak VRAM | Date | Notes |\n"
+    "| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |\n"
+    "| `dual.yml` ⭐ | @x (2× 3090) | fp8 | 262K | **69 / 89** | — | ~23.6 GB | 2026-04-29 | 8-pack 109/150 |\n"
+    "\n"
+    "## Gemma 4 31B (community-experimental)\n"
+    "\n"
+    "### Dual-card (2× RTX 3090, TP=2)\n"
+    "\n"
+    "| Compose | Rig | KV | Max ctx | Narr / Code TPS | PP tok/s | Peak VRAM | Date | Notes |\n"
+    "| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |\n"
+    "| `int8.yml` | @x (2× 3090) | int8 | 192K | 112 / 29 | — | ~23 GB | 2026-06-01 | 8-pack 103/150 |\n"
+    "\n"
+    "## How to add a row for your rig\n"
+    "\n"
+    "| not | a | model | row |\n"
+)
+
+
+# ===========================================================================
+# PHASE 4 — pure parsers (REAL shapes)
+# ===========================================================================
+
+
+class TestPhase4Parsers:
+    def test_estate_diagnose_green(self):
+        from club3090_cockpit.data import EstateDiagnose
+
+        ed = EstateDiagnose.from_dict(json.loads(ESTATE_DIAGNOSE_GREEN))
+        assert ed.valid is True
+        assert ed.summary == "GREEN"
+        assert ed.summary_glyph == "●"
+        assert ed.instance_count == 2
+        assert ed.instances_valid == 2
+        assert ed.cross_checks_ok is True
+
+    def test_estate_diagnose_red(self):
+        from club3090_cockpit.data import EstateDiagnose
+
+        ed = EstateDiagnose.from_dict(json.loads(ESTATE_DIAGNOSE_RED))
+        assert ed.valid is False
+        assert ed.summary_glyph == "○"
+        assert ed.instances_valid == 1   # one of two fits is valid
+        assert ed.cross_checks_ok is False
+
+    def test_estate_diagnose_empty(self):
+        from club3090_cockpit.data import EstateDiagnose
+
+        ed = EstateDiagnose.from_dict(None)
+        assert ed.error and not ed.valid
+
+    def test_profile_triage_green(self):
+        from club3090_cockpit.data import parse_profile_triage
+
+        tri = parse_profile_triage(PROFILE_TRIAGE_GREEN, "vllm/dual")
+        assert tri.summary == "GREEN"
+        assert tri.summary_glyph == "●"
+        assert len(tri.steps) == 6
+        assert tri.passed == 6
+        assert tri.steps[0].num == 1 and tri.steps[0].total == 6
+
+    def test_profile_triage_yellow_with_skip_glyphs(self):
+        """REAL YELLOW output uses ⊘ for skipped + kv-FAIL steps → 'warn'."""
+        from club3090_cockpit.data import parse_profile_triage
+
+        tri = parse_profile_triage(PROFILE_TRIAGE_YELLOW)
+        assert tri.summary == "YELLOW"
+        assert tri.summary_glyph == "◐"
+        by = {s.num: s.status for s in tri.steps}
+        assert by[1] == "warn"   # ⊘ skipped
+        assert by[3] == "passed"
+        assert by[4] == "warn"   # ⊘ kv-calc FAIL
+        assert by[6] == "passed"
+
+    def test_profile_triage_no_output(self):
+        from club3090_cockpit.data import parse_profile_triage
+
+        tri = parse_profile_triage("")
+        assert tri.steps == [] and tri.summary == ""
+
+    def test_power_cap_status_parse(self):
+        from club3090_cockpit.data import parse_power_cap_status
+
+        st = parse_power_cap_status(POWER_CAP_STATUS)
+        assert st.error == ""
+        assert len(st.gpus) == 2
+        assert st.gpus[0].index == 0 and st.gpus[0].limit_w == 370.0
+        assert st.gpus[0].max_w == 390.0
+        assert st.gpus[1].index == 1 and st.gpus[1].limit_w == 420.0
+
+    def test_power_cap_status_empty(self):
+        from club3090_cockpit.data import parse_power_cap_status
+
+        st = parse_power_cap_status("no GPUs here")
+        assert st.gpus == [] and st.error
+
+    def test_docker_top_parse(self):
+        from club3090_cockpit.data import parse_docker_top
+
+        top = parse_docker_top("vllm-x", DOCKER_TOP)
+        assert top.error == ""
+        assert top.header[0] == "UID" and "CMD" in top.header
+        assert len(top.rows) == 1
+        # The trailing CMD (with spaces) stays one cell.
+        assert top.rows[0][0] == "root"
+        assert "vllm.entrypoints" in top.rows[0][-1]
+
+    def test_docker_top_empty(self):
+        from club3090_cockpit.data import parse_docker_top
+
+        top = parse_docker_top("nope", "")
+        assert top.error and top.rows == []
+
+    def test_bench_row_from_corpus_record(self):
+        """#249 corpus record → BenchRow: TPS/ctx from measured_extensions, no 8pk."""
+        from club3090_cockpit.data import bench_row_from_corpus_record
+
+        row = bench_row_from_corpus_record(CORPUS_RECORD)
+        assert row is not None
+        assert row.model == "qwen3.6-27b"
+        assert row.engine == "vllm-stable"
+        assert row.topology == "dual"
+        assert row.code_tps == 44.02       # decode_tps_by_ctx['canonical-short']
+        assert row.narr_tps == 43.81       # wall_tps
+        assert row.max_ctx == "256K"       # 262144 → 256K
+        assert row.quality_8pk == ""       # bench-only record carries no 8pk
+        assert row.source == "corpus"
+        assert row.tag == "vllm/dual"
+        assert row.date == "2026-06-16"
+
+    def test_bench_row_from_corpus_record_no_tps_is_none(self):
+        from club3090_cockpit.data import bench_row_from_corpus_record
+
+        rec = {"model_slug": "x", "engine_id": "y", "topology": "single",
+               "measured_extensions": {"decode_tps_by_ctx": {}}}
+        assert bench_row_from_corpus_record(rec) is None
+
+    def test_bench_rows_from_benchmarks_md(self):
+        """Walks model + topology section headers; parses canonical 9-col rows."""
+        from club3090_cockpit.data import bench_rows_from_benchmarks_md
+
+        rows = bench_rows_from_benchmarks_md(BENCH_MD)
+        # 3 model rows; the 'How to add a row' table is NOT a model section.
+        assert len(rows) == 3
+        by = {(r.model, r.topology): r for r in rows}
+        single = by[("qwen3.6-27b", "single")]
+        assert single.narr_tps == 32.0 and single.code_tps == 33.0
+        assert single.max_ctx == "64K"
+        dual = by[("qwen3.6-27b", "dual")]
+        assert dual.narr_tps == 69.0 and dual.code_tps == 89.0
+        assert dual.quality_8pk == "109/150"
+        assert dual.date == "2026-04-29"
+        assert dual.tag == "dual.yml"
+        gemma = by[("gemma-4-31b", "dual")]
+        assert gemma.narr_tps == 112.0 and gemma.quality_8pk == "103/150"
+
+    def test_bench_rows_md_skips_non_model_sections(self):
+        from club3090_cockpit.data import bench_rows_from_benchmarks_md
+
+        rows = bench_rows_from_benchmarks_md(BENCH_MD)
+        # No row should come from the "How to add a row" section.
+        assert all(r.model in ("qwen3.6-27b", "gemma-4-31b") for r in rows)
+
+
+# ===========================================================================
+# PHASE 4 — Doctor reads (health + estate-diagnose + profile-triage)
+# ===========================================================================
+
+
+class TestPhase4Doctor:
+    @pytest.mark.asyncio
+    async def test_estate_diagnose_read(self):
+        runner = full_runner(**{"diagnose-estate.sh --json": ok(ESTATE_DIAGNOSE_GREEN)})
+        cd = CockpitData(ROOT, runner=runner)
+        ed = await cd.estate_diagnose()
+        assert ed.summary == "GREEN" and ed.instances_valid == 2
+
+    @pytest.mark.asyncio
+    async def test_profile_triage_read(self):
+        runner = full_runner(**{"diagnose-profile.sh vllm/dual": ok(PROFILE_TRIAGE_GREEN)})
+        cd = CockpitData(ROOT, runner=runner)
+        tri = await cd.profile_triage("vllm/dual")
+        assert tri.summary == "GREEN" and tri.passed == 6
+        # It is a READ — diagnose-profile.sh, never a write.
+        call = next(c for c in runner.calls if "diagnose-profile.sh" in " ".join(c))
+        assert call[:2] == ["bash", "scripts/diagnose-profile.sh"]
+
+    @pytest.mark.asyncio
+    async def test_profile_triage_timeout(self):
+        runner = full_runner(
+            **{"diagnose-profile.sh vllm/dual": RunResult(-1, "", "timeout", timed_out=True)}
+        )
+        cd = CockpitData(ROOT, runner=runner)
+        tri = await cd.profile_triage("vllm/dual")
+        assert tri.error and "timed out" in tri.error
+
+    @pytest.mark.asyncio
+    async def test_doctor_all_legs(self):
+        runner = full_runner(
+            **{
+                "health.sh": ok(HEALTH_SERVING),
+                "diagnose-estate.sh --json": ok(ESTATE_DIAGNOSE_GREEN),
+                "diagnose-profile.sh vllm/dual": ok(PROFILE_TRIAGE_GREEN),
+            }
+        )
+        cd = CockpitData(ROOT, runner=runner)
+        rep = await cd.doctor(url="http://localhost:8010", slug="vllm/dual")
+        assert rep.health.serving is True
+        assert rep.estate.summary == "GREEN"
+        assert rep.profile is not None and rep.profile.summary == "GREEN"
+
+    @pytest.mark.asyncio
+    async def test_doctor_no_slug_skips_profile(self):
+        runner = full_runner(
+            **{"health.sh": ok(HEALTH_DOWN), "diagnose-estate.sh --json": ok(ESTATE_DIAGNOSE_GREEN)}
+        )
+        cd = CockpitData(ROOT, runner=runner)
+        rep = await cd.doctor()
+        assert rep.profile is None  # no slug → no profile triage
+        # diagnose-profile must NOT have been called.
+        assert not any("diagnose-profile.sh" in " ".join(c) for c in runner.calls)
+
+
+# ===========================================================================
+# PHASE 4 — Benchmarks explorer (corpus → BENCHMARKS.md fallback)
+# ===========================================================================
+
+
+class _MdCockpitData(CockpitData):
+    """CockpitData with BENCHMARKS.md + corpus reads stubbed (no disk dep)."""
+
+    def __init__(self, *a, md_text="", corpus_rows=None, **k):
+        super().__init__(*a, **k)
+        self._md_text = md_text
+        self._corpus_rows = corpus_rows or []
+
+    def _read_benchmarks_md(self):
+        return self._md_text
+
+    def _read_measurement_corpus(self):
+        return list(self._corpus_rows)
+
+
+class TestPhase4BenchmarksExplorer:
+    @pytest.mark.asyncio
+    async def test_explorer_md_only(self):
+        cd = _MdCockpitData(ROOT, runner=full_runner(), md_text=BENCH_MD)
+        rows, err = await cd.benchmarks_explorer()
+        assert err is None
+        assert len(rows) == 3
+        assert all(r.source == "benchmarks.md" for r in rows)
+
+    @pytest.mark.asyncio
+    async def test_explorer_corpus_preferred_and_borrows_8pk(self):
+        """Corpus row wins its (model, engine, topo) key AND borrows the 8-pack
+        the bench-only corpus record lacks from the markdown row."""
+        from club3090_cockpit.data import bench_row_from_corpus_record
+
+        corpus = [bench_row_from_corpus_record(CORPUS_RECORD)]  # qwen/vllm-stable/dual
+        # Markdown dual row carries 8-pack 109/150 but uses engine token '' (it's
+        # a `dual.yml` filename) — so make a corpus-key-matching md row instead.
+        md = BENCH_MD.replace("| `dual.yml` ⭐", "| `vllm-stable/dual` ⭐")
+        cd = _MdCockpitData(ROOT, runner=full_runner(), md_text=md, corpus_rows=corpus)
+        rows, err = await cd.benchmarks_explorer()
+        assert err is None
+        corpus_row = next(r for r in rows if r.source == "corpus")
+        assert corpus_row.quality_8pk == "109/150"  # borrowed from md
+        # Corpus row replaced the md row for that key (no duplicate).
+        keys = [(r.model, r.engine, r.topology) for r in rows]
+        assert keys.count(("qwen3.6-27b", "vllm-stable", "dual")) == 1
+
+    @pytest.mark.asyncio
+    async def test_explorer_empty_both_sources(self):
+        cd = _MdCockpitData(ROOT, runner=full_runner(), md_text="", corpus_rows=[])
+        rows, err = await cd.benchmarks_explorer()
+        assert rows == [] and err is not None
+
+    @pytest.mark.asyncio
+    async def test_corpus_dir_absent_returns_empty(self):
+        """A fresh rig has no results/measurement-records/ dir → [] (not crash).
+        Uses the REAL _read_measurement_corpus against a nonexistent root."""
+        cd = CockpitData(Path("/tmp/nonexistent-club3090-root-xyz"), runner=full_runner())
+        assert cd._read_measurement_corpus() == []
+
+
+# ===========================================================================
+# PHASE 4 — Evidence (rebench run tags + paste-ready report)
+# ===========================================================================
+
+
+class TestPhase4Evidence:
+    @pytest.mark.asyncio
+    async def test_evidence_list_enumerates_tags(self, tmp_path):
+        base = tmp_path / "results" / "rebench"
+        (base / "tagA").mkdir(parents=True)
+        (base / "tagA" / "REPORT.md").write_text(
+            "# Rebench report — tagA\n\n## TL;DR\n\n- TPS narrative **40.7** / code **44.0**.\n"
+            "\n## Meta\n\n- **Date:** 2026-06-16\n",
+            encoding="utf-8",
+        )
+        (base / "tagA" / "_internal.json").write_text("{}", encoding="utf-8")
+        (base / "tagA" / "soak.log").write_text("x", encoding="utf-8")
+        (base / "tagB").mkdir(parents=True)   # bare tag, no artifacts
+        cd = CockpitData(tmp_path, runner=full_runner())
+        tags = await cd.evidence_list()
+        names = [t.tag for t in tags]
+        assert "tagA" in names and "tagB" in names
+        a = next(t for t in tags if t.tag == "tagA")
+        assert a.has_report and a.has_internal and a.has_soak
+        assert a.date == "2026-06-16"
+        assert "40.7" in a.tldr
+        b = next(t for t in tags if t.tag == "tagB")
+        assert not b.has_report and b.date  # mtime fallback
+
+    @pytest.mark.asyncio
+    async def test_evidence_list_no_rebench_dir(self):
+        cd = CockpitData(Path("/tmp/nonexistent-club3090-root-xyz"), runner=full_runner())
+        assert await cd.evidence_list() == []
+
+    @pytest.mark.asyncio
+    async def test_evidence_report_reads_generated_report(self, tmp_path):
+        base = tmp_path / "results" / "rebench" / "tagA"
+        base.mkdir(parents=True)
+        # The (mocked) rebench-report.py "generates" REPORT.md — simulate by
+        # having the file already present; the runner returns ok with no spawn.
+        base.joinpath("REPORT.md").write_text("# Rebench report — tagA\n\nbody here\n", encoding="utf-8")
+        runner = full_runner(**{"rebench-report.py": ok("wrote REPORT.md")})
+        cd = CockpitData(tmp_path, runner=runner)
+        rep = await cd.evidence_report("tagA")
+        assert rep.error == ""
+        assert "body here" in rep.body
+        assert rep.report_path.endswith("REPORT.md")
+        # It used the report generator (a READ of results), never a write script.
+        call = next(c for c in runner.calls if "rebench-report.py" in " ".join(c))
+        assert "--no-discuss" in call
+
+    @pytest.mark.asyncio
+    async def test_evidence_report_missing_tag(self, tmp_path):
+        cd = CockpitData(tmp_path, runner=full_runner())
+        rep = await cd.evidence_report("nope")
+        assert rep.error and "no run dir" in rep.error
+
+
+# ===========================================================================
+# PHASE 4 — submit-bench (READ preview vs OUTWARD-FACING gated write)
+# ===========================================================================
+
+
+class TestPhase4SubmitBench:
+    @pytest.mark.asyncio
+    async def test_submit_bench_preview_is_read(self, tmp_path):
+        """submit-bench.sh --tag (NO --auto-submit) only generates the row file —
+        no network, no PR (verified live)."""
+        base = tmp_path / "results" / "rebench" / "tagA"
+        base.mkdir(parents=True)
+        base.joinpath("BENCHMARKS-row.md").write_text(
+            "| `dual.yml` | @x | fp8 | 262K | 69 / 89 | ... |", encoding="utf-8"
+        )
+        runner = full_runner(**{"submit-bench.sh": ok("Generated row")})
+        cd = CockpitData(tmp_path, runner=runner)
+        out = await cd.submit_bench_preview("tagA")
+        assert out["error"] is None
+        assert "69 / 89" in out["row"]
+        # The preview command must NOT carry --auto-submit (no network).
+        call = next(c for c in runner.calls if "submit-bench.sh" in " ".join(c))
+        assert "--auto-submit" not in call
+
+    def test_submit_bench_plan_is_network_gated(self):
+        cd = CockpitData(ROOT, runner=full_runner())
+        plan = cd.submit_bench("tagA")
+        assert plan.kind == "submit_bench"
+        assert "--auto-submit" in plan.cmd
+        assert plan.network is True
+        assert plan.requires_confirm is True
+        assert plan.requires_reconcile is False  # no GPU contention
+
+    def test_submit_bench_as_pr(self):
+        cd = CockpitData(ROOT, runner=full_runner())
+        plan = cd.submit_bench("tagA", as_pr=True)
+        assert "--as-pr" in plan.cmd
+
+    @pytest.mark.asyncio
+    async def test_submit_bench_never_auto_fires_network(self):
+        """Building the plan must NOT touch the runner/network — execution is the
+        caller's confirmed dispatch, mocked here."""
+        runner = full_runner()
+        cd = CockpitData(ROOT, runner=runner)
+        cd.submit_bench("tagA")
+        # No submit-bench call was made just by building the plan.
+        assert not any("submit-bench.sh" in " ".join(c) for c in runner.calls)
+
+
+# ===========================================================================
+# PHASE 4 — power cap (read safe · write/sweep WIRED mock-only confirm)
+# ===========================================================================
+
+
+class TestPhase4PowerCap:
+    @pytest.mark.asyncio
+    async def test_power_cap_get_is_read(self):
+        runner = full_runner(**{"power-cap status": ok(POWER_CAP_STATUS)})
+        cd = CockpitData(ROOT, runner=runner)
+        st = await cd.power_cap_get()
+        assert len(st.gpus) == 2 and st.gpus[0].limit_w == 370.0
+        call = next(c for c in runner.calls if "power-cap" in " ".join(c))
+        assert call == ["bash", "scripts/gpu-mode.sh", "power-cap", "status"]
+
+    def test_power_cap_set_on_off(self):
+        cd = CockpitData(ROOT, runner=full_runner())
+        on = cd.power_cap_set("on")
+        assert on.cmd == ["bash", "scripts/gpu-mode.sh", "power-cap", "on"]
+        assert on.requires_confirm is True and on.requires_reconcile is False
+        off = cd.power_cap_set("off")
+        assert off.cmd[-1] == "off"
+
+    def test_power_cap_set_rejects_wattage(self):
+        """gpu-mode power-cap takes on/off, NOT a wattage (verified live)."""
+        cd = CockpitData(ROOT, runner=full_runner())
+        with pytest.raises(ValueError):
+            cd.power_cap_set("330")
+
+    def test_power_cap_sweep_plan(self):
+        cd = CockpitData(ROOT, runner=full_runner())
+        plan = cd.power_cap_sweep(caps=[300, 330, 370])
+        assert plan.kind == "power_cap_sweep"
+        assert "--caps" in plan.cmd and "300,330,370" in plan.cmd
+        assert plan.requires_confirm is True
+
+
+# ===========================================================================
+# PHASE 4 — prune (WIRED mock-only, destructive → confirm)
+# ===========================================================================
+
+
+class TestPhase4Prune:
+    def test_prune_plan(self):
+        cd = CockpitData(ROOT, runner=full_runner())
+        p = cd.prune()
+        assert p.cmd == ["bash", "scripts/gpu-mode.sh", "prune"]
+        assert p.requires_confirm is True
+        assert p.requires_reconcile is False  # deletes images, not GPU contention
+
+    def test_prune_all_plan(self):
+        cd = CockpitData(ROOT, runner=full_runner())
+        p = cd.prune(all=True)
+        assert p.cmd[-1] == "prune-all"
+
+
+# ===========================================================================
+# PHASE 4 — container top (READ) + rm (WIRED mock-only, reconcile-gated)
+# ===========================================================================
+
+
+class TestPhase4Container:
+    @pytest.mark.asyncio
+    async def test_container_top_is_read(self):
+        runner = full_runner(**{"docker top": ok(DOCKER_TOP)})
+        cd = CockpitData(ROOT, runner=runner)
+        top = await cd.container_top("vllm-x")
+        assert top.error == "" and len(top.rows) == 1
+        call = next(c for c in runner.calls if "top" in " ".join(c))
+        assert call == ["docker", "top", "vllm-x"]
+
+    @pytest.mark.asyncio
+    async def test_container_top_missing(self):
+        runner = full_runner(**{"docker top": RunResult(1, "", "Error: No such container: nope")})
+        cd = CockpitData(ROOT, runner=runner)
+        top = await cd.container_top("nope")
+        assert top.error and top.rows == []
+
+    def test_container_rm_is_reconcile_gated(self):
+        cd = CockpitData(ROOT, runner=full_runner())
+        p = cd.container_rm("vllm-x")
+        assert p.kind == "container_rm"
+        assert p.cmd == ["docker", "rm", "vllm-x"]
+        assert p.requires_reconcile is True   # frees a GPU → gate it
+        assert p.requires_confirm is True
+
+    def test_container_rm_force_requires_reason(self):
+        cd = CockpitData(ROOT, runner=full_runner())
+        with pytest.raises(ValueError):
+            cd.container_rm("vllm-x", force=True)
+
+    def test_container_rm_force_adds_f(self):
+        cd = CockpitData(ROOT, runner=full_runner())
+        p = cd.container_rm("vllm-x", force=True, force_reason="user accepted teardown")
+        assert "-f" in p.cmd and p.force is True
+
+
+# ===========================================================================
+# PHASE 4 — run_validation (WIRED, execution MOCKED, no reconcile)
+# ===========================================================================
+
+
+class TestPhase4RunValidation:
+    def test_validation_plan_builds_for_each_kind(self):
+        cd = CockpitData(ROOT, runner=full_runner())
+        # Most kinds shell out via bash; stream-toolcall-probe is a .py (python3).
+        bash_kinds = ("verify-full", "verify-stress", "bench", "quality-test",
+                      "soak-test", "rebench-full", "quality-baseline",
+                      "bench-agentic")
+        for kind in bash_kinds:
+            plan = cd.validation_plan(kind, model="qwen3.6-27b", url="http://localhost:8010")
+            assert plan.kind == "validation"
+            assert plan.cmd[0] == "bash"
+            assert plan.requires_reconcile is False  # hits model, no GPU claim
+            assert plan.requires_confirm is True     # heavy → confirm
+        probe = cd.validation_plan("stream-toolcall-probe", model="qwen3.6-27b", url="http://localhost:8010")
+        assert probe.cmd[0] == "python3"
+        assert probe.requires_reconcile is False and probe.requires_confirm is True
+
+    def test_validation_plan_real_script_names(self):
+        """The wired cmds use the REAL on-disk script names (verified live):
+        quality-baseline.sh (its own #252 wrapper, NOT --baseline on quality-test)
+        and stream-toolcall-probe.py (a .py taking --url/--model, NOT a .sh)."""
+        cd = CockpitData(ROOT, runner=full_runner())
+        qb = cd.validation_plan("quality-baseline")
+        assert qb.cmd[:2] == ["bash", "scripts/quality-baseline.sh"]
+        probe = cd.validation_plan("stream-toolcall-probe")
+        assert probe.cmd[:2] == ["python3", "scripts/stream-toolcall-probe.py"]
+
+    def test_validation_plan_probe_takes_url_model_as_cli_args(self):
+        """stream-toolcall-probe.py reads --url/--model from the CLI, not env."""
+        cd = CockpitData(ROOT, runner=full_runner())
+        plan = cd.validation_plan(
+            "stream-toolcall-probe", model="qwen3.6-27b", url="http://localhost:8010"
+        )
+        assert "--url" in plan.cmd and "http://localhost:8010" in plan.cmd
+        assert "--model" in plan.cmd and "qwen3.6-27b" in plan.cmd
+
+    def test_validation_plan_quality_baseline_threads_slug(self):
+        """quality-baseline.sh REQUIRES --slug; it's appended when supplied."""
+        cd = CockpitData(ROOT, runner=full_runner())
+        plan = cd.validation_plan("quality-baseline", slug="vllm/dual")
+        assert "--slug" in plan.cmd and "vllm/dual" in plan.cmd
+
+    def test_validation_plan_unknown_kind(self):
+        cd = CockpitData(ROOT, runner=full_runner())
+        with pytest.raises(ValueError):
+            cd.validation_plan("nope")
+
+    def test_validation_parser_maps_to_core_parser(self):
+        from club3090_tui_core.parsers import BenchParser, VerifyParser, QualityParser
+
+        cd = CockpitData(ROOT, runner=full_runner())
+        assert isinstance(cd._validation_parser("bench"), BenchParser)
+        assert isinstance(cd._validation_parser("verify-full"), VerifyParser)
+        assert isinstance(cd._validation_parser("quality-test"), QualityParser)
+        # Extra tools have no dedicated parser → NullParser passthrough.
+        np = cd._validation_parser("bench-agentic")
+        assert np.parse_line("anything") is None
+
+    @pytest.mark.asyncio
+    async def test_run_validation_streams_via_mocked_write_runner(self):
+        """run_validation LAUNCHES via the (mocked) write runner — never live.
+        conftest blocks the real spawn; here we inject a FakeWriteRunner."""
+        wr = FakeWriteRunner()
+        cd = CockpitData(ROOT, runner=full_runner(), write_runner=wr)
+        state = await cd.run_validation("bench", model="qwen3.6-27b", url="http://localhost:8010")
+        assert state is not None
+        assert len(wr.started) == 1
+        assert wr.started[0]["cmd"] == ["bash", "scripts/bench.sh"]
+        assert wr.started[0]["run_type"] == "validation"
+
+    @pytest.mark.asyncio
+    async def test_run_validation_does_not_reconcile(self):
+        """Validation hits the model but does not claim a GPU → no detect call."""
+        wr = FakeWriteRunner()
+
+        async def detect_should_not_be_called():
+            raise AssertionError("validation must not run the reconcile gate")
+
+        cd = CockpitData(
+            ROOT, runner=full_runner(), write_runner=wr,
+            detect_endpoint_fn=detect_should_not_be_called,
+        )
+        await cd.run_validation("verify-full")
+        assert len(wr.started) == 1
+
+
+# ===========================================================================
+# PHASE 4 — gated writes route through execute_action (reconcile/confirm)
+# ===========================================================================
+
+
+class TestPhase4GatedWriteExecution:
+    @pytest.mark.asyncio
+    async def test_container_rm_unsafe_gate_refuses(self):
+        """container_rm requires_reconcile=True → refused when the gate is unsafe
+        (the target container is live), unless forced."""
+        write_runner = FakeWriteRunner()
+        runner = full_runner(
+            **{"docker ps": ok(DOCKER_PS_ENGINE), "estate_cli.py report-state --json": ok(ESTATE_REPORT_FREE)}
+        )
+        gpus = [GpuInfo(index=0, mem_used_mib=22000), GpuInfo(index=1, mem_used_mib=1)]
+        cd = CockpitData(
+            ROOT, runner=runner, write_runner=write_runner,
+            detect_endpoint_fn=make_detect(ServingTarget(gpus=gpus)),
+            get_gpu_info_fn=make_gpu_info(gpus),
+        )
+        plan = cd.container_rm("vllm-qwen36-27b-dual")
+        executed, rec, _ = await cd.execute_action(plan)
+        assert executed is False
+        assert rec is not None and rec.safe is False
+        assert write_runner.started == []  # destructive rm never reached the runner
+
+    @pytest.mark.asyncio
+    async def test_prune_skips_reconcile_but_runs_via_mocked_runner(self):
+        """prune has requires_reconcile=False → no detect; reaches mocked runner."""
+        write_runner = FakeWriteRunner()
+
+        async def detect_should_not_be_called():
+            raise AssertionError("prune must not reconcile (no GPU contention)")
+
+        cd = CockpitData(
+            ROOT, runner=full_runner(), write_runner=write_runner,
+            detect_endpoint_fn=detect_should_not_be_called,
+        )
+        executed, rec, _ = await cd.execute_action(cd.prune())
+        assert executed is True and rec is None
+        assert len(write_runner.started) == 1
+        assert write_runner.started[0]["cmd"] == ["bash", "scripts/gpu-mode.sh", "prune"]
+
+    @pytest.mark.asyncio
+    async def test_submit_bench_runs_via_mocked_runner_only(self):
+        """The outward submit reaches ONLY the mocked write runner (network is
+        never touched live — conftest blocks the real spawn)."""
+        write_runner = FakeWriteRunner()
+        cd = CockpitData(ROOT, runner=full_runner(), write_runner=write_runner)
+        executed, rec, _ = await cd.execute_action(cd.submit_bench("tagA"))
+        assert executed is True and rec is None  # no reconcile
+        assert len(write_runner.started) == 1
+        assert "--auto-submit" in write_runner.started[0]["cmd"]

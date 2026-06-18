@@ -1,8 +1,8 @@
 """club3090 serve cockpit — main Textual application.
 
-Phase 3 (Wire): the four panes are wired to the real data layer
-(``services.CockpitData`` + ``data.py`` shapes), reusing the shared core
-(``club3090_tui_core``) for detect / streaming / widgets.
+All four modes are wired to the real data layer (``services.CockpitData`` +
+``data.py`` shapes), reusing the shared core (``club3090_tui_core``) for detect /
+streaming / widgets.
 
   - Discover / Catalog  : real enriched rows from ``CockpitData.load_catalog``;
                           ``e`` opens ``explain``, ``/`` filters, ``⏎`` → Serve.
@@ -12,15 +12,27 @@ Phase 3 (Wire): the four panes are wired to the real data layer
                           ``serve(slug)`` (NOT --force) streamed via the core
                           SubprocessRunner; ``F`` surfaces the force override.
   - Estate / Orch        : ``estate_state`` live (GPU cards, Doctor, scenes,
-                          services); scene-switch → confirm modal that FIRST
-                          calls ``reconcile_before_write`` then ``scene_switch``.
-  - Estate / Containers  : ``containers`` real list; drill into Logs/Stats/Config;
-                          restart/stop behind the reconcile-gated confirm.
+                          services, power-cap); scene-switch → confirm modal that
+                          FIRST calls ``reconcile_before_write`` then ``scene_switch``;
+                          ``c`` cap on/off, ``w`` cap sweep, ``p`` prune (all gated).
+  - Estate / Containers  : ``containers`` real list; drill into Logs/Top/Config;
+                          restart/stop/rm behind the reconcile-gated confirm.
+  - Validate / Run       : launchable ladder + extra tools (``run_validation``,
+                          confirm-gated, streamed into a LivePane) + §3.5 *tune*
+                          gotchas inline.
+  - Validate / Doctor    : real cards from ``doctor()`` (health + diagnose-estate
+                          + diagnose-profile).
+  - Validate / Benchmarks: the real ``benchmarks_explorer()`` (filter + sort).
+  - Validate / Evidence  : ``evidence_list()`` run tags; ``⏎`` opens the
+                          ``evidence_report()`` modal; ``s`` stages the gated
+                          submit-to-localmaxxing (outward NETWORK write, never auto).
 
-EVERY write path (serve / scene-switch / estate-down / container restart|stop)
-goes through ``CockpitData.execute_action``, which re-runs the reconcile gate
-first and refuses when unsafe (unless an explicit, reasoned force override).
-In this phase the write runner is NEVER executed live — tests inject a fake.
+EVERY GPU-claiming write (serve / scene-switch / estate-down / container
+restart|stop|rm) goes through ``CockpitData.execute_action``, which re-runs the
+reconcile gate first and refuses when unsafe (unless an explicit, reasoned force
+override).  Heavy/destructive non-GPU writes (validation launches, submit-bench
+POST, power-cap, prune) are confirm-gated too.  The write runner / network are
+NEVER executed live — tests inject fakes and conftest blocks the real spawn.
 """
 
 from __future__ import annotations
@@ -50,10 +62,15 @@ from club3090_tui_core.widgets.live_pane import LivePane
 
 from .data import (
     ActionPlan,
+    BenchRow,
     ByoResult,
     CatalogEntry,
     ContainerInfo,
+    DoctorReport,
     EstateState,
+    EvidenceReport,
+    EvidenceTag,
+    PowerCapState,
     ReconcileResult,
     Scene,
     measurement_from_explain_columns,
@@ -112,18 +129,28 @@ class HelpScreen(ModalScreen):
 
   [cyan]1[/cyan]  Discover    [cyan]2[/cyan]  Serve    [cyan]3[/cyan]  Estate    [cyan]4[/cyan]  Validate
   [cyan]r[/cyan]  Refresh (re-reads the live data layer for the active mode)
-  [cyan]/[/cyan]  Filter catalog (Discover · Catalog)
+  [cyan]/[/cyan]  Filter (Discover · Catalog · or Validate · Benchmarks)
   [cyan]e[/cyan]  Explain selected slug (Discover · Catalog)
-  [cyan]⏎[/cyan]  Primary action (serve / launch / switch scene)
+  [cyan]⏎[/cyan]  Primary action (serve / launch / switch scene / run step / open report)
   [cyan]F[/cyan]  Force override (Serve — surfaced, requires a reason)
   [cyan]?[/cyan]  This help        [cyan]q[/cyan]  Quit
 
+[bold]Estate · Orchestration[/bold]
+  [cyan]o[/cyan] stop all   [cyan]c[/cyan] power-cap on/off   [cyan]w[/cyan] cap sweep   [cyan]p[/cyan] prune images   (all gated)
+[bold]Estate · Containers[/bold]
+  [cyan]l[/cyan] logs   [cyan]t[/cyan] top (read)   [cyan]s[/cyan] restart   [cyan]x[/cyan] stop   [cyan]X[/cyan] rm   (writes gated)
+[bold]Validate[/bold]
+  Run: [cyan]⏎[/cyan] launch step (gated)   Benchmarks: [cyan]/[/cyan] filter [cyan]t[/cyan] sort
+  Evidence: [cyan]⏎[/cyan] open report   [cyan]s[/cyan] submit to localmaxxing (gated · never auto)
+
 [bold]Safety — the reconcile gate[/bold]
 
-  Every write (serve, scene-switch, estate-down, container restart/stop)
-  re-runs a FRESH detect immediately before executing and refuses if a
-  running container / busy GPU / active estate claim would collide.  The
-  confirm modal shows exactly what a write would tear down.  Nothing is
+  Every write (serve, scene-switch, estate-down, container restart/stop/rm,
+  power-cap, prune, submit-bench) goes through a confirm modal.  GPU-claiming
+  writes re-run a FRESH detect immediately before executing and refuse if a
+  running container / busy GPU / active estate claim would collide; the modal
+  shows exactly what a write would tear down.  Validation launches and the
+  outward submit are heavy / network — confirmed, never auto-fired.  Nothing is
   ever forced silently — F surfaces the override with its reason.
 
 [bold]Status glyphs[/bold]
@@ -625,10 +652,16 @@ class ConfirmActionScreen(ModalScreen):
         Binding("escape", "cancel", "Cancel"),
     ]
 
-    def __init__(self, plan: ActionPlan, **kwargs):
+    def __init__(self, plan: ActionPlan, *, on_confirm=None, **kwargs):
         super().__init__(**kwargs)
         self._plan = plan
         self._reconcile: Optional[ReconcileResult] = None
+        # Optional alternate commit path.  Default (None) → the app's gated
+        # ``dispatch_action`` (execute_action).  Set for launches that don't go
+        # through execute_action — notably validation runs, which stream via
+        # ``run_validation`` into the Run LivePane and never claim a GPU.  The
+        # callback receives the (possibly force-reissued) plan.
+        self._on_confirm = on_confirm
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -723,6 +756,11 @@ class ConfirmActionScreen(ModalScreen):
                 force_reason="user accepted teardown via Force override",
             )
         self.app.pop_screen()
+        if self._on_confirm is not None:
+            # Alternate commit path (e.g. a validation launch that streams via
+            # run_validation rather than the gated execute_action).
+            self._on_confirm(plan)
+            return
         # Hand the actual (gated, mocked-in-test) execution back to the app.
         self.app.dispatch_action(plan)  # type: ignore[attr-defined]
 
@@ -788,6 +826,16 @@ class EstateOrchPane(Container):
         padding: 0 1;
         margin: 0 1 1 1;
     }
+    EstateOrchPane #powercap-heading {
+        text-style: bold;
+        padding: 0 1;
+        margin: 0 1 0 1;
+    }
+    EstateOrchPane #powercap-strip {
+        padding: 0 1;
+        margin: 0 1 1 1;
+        color: $text;
+    }
     EstateOrchPane #orch-hint {
         padding: 0 1;
         margin: 0 1;
@@ -812,8 +860,12 @@ class EstateOrchPane(Container):
             yield scene_table
             yield Label("Services", id="services-heading")
             yield Static("[dim]reading estate…[/dim]", id="services-strip")
+            yield Label("Power cap", id="powercap-heading")
+            yield Static("[dim]reading power-cap status…[/dim]", id="powercap-strip")
             yield Label(
-                "[dim]\\[⏎] switch scene (reconcile-gated)   \\[o] stop all (gated)[/dim]",
+                "[dim]\\[⏎] switch scene (gated)   \\[o] stop all (gated)   "
+                "\\[c] cap on/off (gated)   \\[w] cap sweep (gated)   "
+                "\\[p] prune images (gated)[/dim]",
                 id="orch-hint",
             )
 
@@ -829,6 +881,22 @@ class EstateOrchPane(Container):
         self._populate_doctor(state)
         self._populate_scenes(state.scenes)
         self._populate_services(state)
+
+    def populate_power_cap(self, st: PowerCapState) -> None:
+        strip = self.query_one("#powercap-strip", Static)
+        if st.error and not st.gpus:
+            strip.update(f"[dim]{st.error}[/dim]")
+            return
+        bits: list[str] = []
+        for g in st.gpus:
+            lim = f"{g.limit_w:.0f}W" if g.limit_w is not None else "—"
+            dflt = f"{g.default_w:.0f}W" if g.default_w is not None else "—"
+            capped = (
+                g.limit_w is not None and g.default_w is not None and g.limit_w < g.default_w
+            )
+            tag = "[yellow]capped[/yellow]" if capped else "[green]uncapped[/green]"
+            bits.append(f"GPU{g.index} {lim}/{dflt} {tag}")
+        strip.update("  " + "   ·   ".join(bits) if bits else "[dim]no GPUs[/dim]")
 
     def _populate_gpus(self, state: EstateState) -> None:
         for i, bar_id, title_id in ((0, "#gpu0-bar", "#gpu0-card"), (1, "#gpu1-bar", "#gpu1-card")):
@@ -953,12 +1021,13 @@ class EstateContainersPane(Container):
         with TabbedContent(id="drill-tabs"):
             with TabPane("Logs", id="drill-tab-logs"):
                 yield LivePane(id="drill-logs")
-            with TabPane("Stats", id="drill-tab-stats"):
-                yield Static("[dim]select a container to read docker stats[/dim]", id="drill-stats")
+            with TabPane("Top", id="drill-tab-stats"):
+                yield Static("[dim]select a container and press \\[t] to read docker top[/dim]", id="drill-stats")
             with TabPane("Config", id="drill-tab-config"):
-                yield Static("[dim]select a container to read its config[/dim]", id="drill-config")
+                yield Static("[dim]select a container and press \\[t] to read its config[/dim]", id="drill-config")
         yield Label(
-            "[dim]\\[l] logs   \\[s] restart (gated)   \\[x] stop (gated)[/dim]",
+            "[dim]\\[l] logs   \\[t] top (read)   \\[s] restart (gated)   "
+            "\\[x] stop (gated)   \\[X] rm (reconcile-gated)[/dim]",
             id="containers-hint",
         )
 
@@ -983,6 +1052,41 @@ class EstateContainersPane(Container):
                 c.slug or "—",
             )
 
+    def populate_top(self, top) -> None:
+        """Render a ContainerTop into the Top drill tab (READ)."""
+        body = self.query_one("#drill-stats", Static)
+        if top.error:
+            body.update(f"[red]docker top failed:[/red] {top.error}")
+            return
+        from rich.markup import escape
+
+        lines = ["  " + "  ".join(escape(h) for h in top.header)]
+        for row in top.rows[:30]:
+            lines.append("  " + "  ".join(escape(c) for c in row))
+        if not top.rows:
+            lines.append("  [dim](no processes)[/dim]")
+        body.update("\n".join(lines))
+
+    def populate_config(self, con: Optional[ContainerInfo], variant) -> None:
+        """Render the selected container's registry/compose info into Config
+        (a local READ — uses the cached registry row matched to the container)."""
+        body = self.query_one("#drill-config", Static)
+        if con is None:
+            body.update("[dim]select a container to read its config[/dim]")
+            return
+        lines = [
+            f"  [bold]Container[/bold]  {con.name}",
+            f"  [bold]Kind[/bold]       {con.kind}",
+            f"  [bold]Port[/bold]       {con.host_port or '—'} → {con.internal_port or '—'}",
+            f"  [bold]Engine[/bold]     {con.engine or '—'}",
+            f"  [bold]Slug[/bold]       {con.slug or '[dim]unmatched[/dim]'}",
+        ]
+        if variant is not None:
+            lines.append(f"  [bold]Compose[/bold]    [dim]{getattr(variant, 'compose_path', '') or '—'}[/dim]")
+            if getattr(variant, "status", ""):
+                lines.append(f"  [bold]Status[/bold]     {variant.status}")
+        body.update("\n".join(lines))
+
     def selected_container(self) -> Optional[ContainerInfo]:
         t = self.query_one("#containers-table", DataTable)
         idx = t.cursor_row
@@ -991,21 +1095,54 @@ class EstateContainersPane(Container):
         return None
 
 
-# ── Validate panes (Phase 4 — left as illustrative; out of scope this step) ──────
+# ── Validate panes (Phase 4 — wired to the data layer) ───────────────────────────
+
+
+# The §3.5 *tune* gotchas surfaced inline on the Run pane.  These are the
+# "judge the numbers right" warnings the maintainer learned the slow way; they
+# are advisory text, NOT data — shown so a launch isn't misread.
+_TUNE_GOTCHAS = (
+    "[bold]Reading the results — gotchas[/bold]\n"
+    "  • [yellow]Cliffs[/yellow]: single-card long-ctx configs degrade at ~21-26K accumulated "
+    "ctx (Cliff 2) — soak-continuous catches it, a one-shot bench won't.\n"
+    "  • [yellow]NIAH ≠ allocation[/yellow]: a passing needle at depth D does not prove the KV "
+    "pool fits D tokens of real traffic — verify-stress ladders the allocation.\n"
+    "  • [yellow]Spec-dec[/yellow]: judge MTP/DFlash on the bench TPS [italic]delta[/italic] (on vs off), "
+    "never the accept-rate alone — a high accept can still net-regress on this MoE.\n"
+    "  • [yellow]A/B at matched power[/yellow]: the rig systemd-caps to 230W; compare two configs "
+    "only at the SAME power cap, or a power artifact masquerades as a config win."
+)
+
+
+# The launchable ladder + extra tools, in display order.  Each row is
+# (kind, label, blurb).  ``kind`` is the CockpitData.run_validation kind.
+_RUN_LADDER: list[tuple[str, str, str]] = [
+    ("verify-full", "verify-full", "functional smoke (8/8) — does it serve + work"),
+    ("verify-stress", "verify-stress", "boundary matrix (7/7) — long-ctx + tool-prefill OOM"),
+    ("bench", "bench", "canonical TPS bench (3 warm + 5 measured)"),
+    ("quality-test", "quality-test", "behavioral 8-pack (--quick) — tool / instruct / struct"),
+    ("soak-test", "soak-test", "stability (continuous) — catches Cliff 2b"),
+    ("rebench-full", "rebench-full", "the 5-step orchestrator (bench→stress→quality→soak→aider)"),
+]
+_RUN_EXTRAS: list[tuple[str, str, str]] = [
+    ("quality-baseline", "quality-baseline", "regression diff vs the curated baseline (#252)"),
+    ("bench-agentic", "bench-agentic", "multi-turn prefill stress"),
+    ("stream-toolcall-probe", "stream-toolcall-probe", "silent-streaming tool-call check"),
+]
 
 
 class ValidateRunPane(Container):
-    """Validate / Run tab: ladder steps + extra tools + output area.
+    """Validate / Run tab: launchable ladder steps + extra tools + a live
+    output pane, with the §3.5 *tune* gotchas inline.
 
-    Phase 4 surface — left as an illustrative mockup; wiring lands with the
-    §5.2 evidence corpus.  Clearly labelled so it isn't mistaken for live data.
+    Each step launches a heavy validation script via ``CockpitData`` —
+    confirm-gated (these stress / hit a serving model).  In this phase the
+    write runner is NEVER executed live; tests inject a fake.  Output streams
+    into the core LivePane below.
     """
 
     DEFAULT_CSS = """
     ValidateRunPane {
-        height: 1fr;
-    }
-    ValidateRunPane #run-scroll {
         height: 1fr;
     }
     ValidateRunPane #run-heading {
@@ -1013,26 +1150,23 @@ class ValidateRunPane(Container):
         padding: 0 1;
         margin: 0 1 0 1;
     }
-    ValidateRunPane #run-ladder {
-        border: solid $primary;
-        padding: 1 2;
-        margin: 0 1 1 1;
+    ValidateRunPane #run-ladder-table {
         height: auto;
-    }
-    ValidateRunPane #run-extras {
-        border: solid $primary;
-        padding: 1 2;
+        max-height: 14;
         margin: 0 1 1 1;
-        height: auto;
     }
-    ValidateRunPane #run-output {
-        border: solid $primary;
-        padding: 1 2;
+    ValidateRunPane #run-gotchas {
+        border: solid $warning;
+        padding: 0 1;
         margin: 0 1 1 1;
         height: auto;
         color: $text-muted;
     }
-    ValidateRunPane #run-phase-note {
+    ValidateRunPane LivePane {
+        height: 1fr;
+        margin: 0 1;
+    }
+    ValidateRunPane #run-hint {
         padding: 0 1;
         margin: 0 1;
         color: $text-muted;
@@ -1040,38 +1174,51 @@ class ValidateRunPane(Container):
     """
 
     def compose(self) -> ComposeResult:
-        with ScrollableContainer(id="run-scroll"):
-            yield Label("Run  [dim](illustrative — Phase 4)[/dim]", id="run-heading")
-            yield Static(
-                "[bold]Validation ladder[/bold]  [dim](example steps)[/dim]\n\n"
-                "  [cyan]▷[/cyan] verify-full         [green]✓[/green]   [dim]0m 18s[/dim]\n"
-                "  [cyan]▷[/cyan] verify-stress       [green]✓[/green]   [dim]4m 02s[/dim]\n"
-                "  [cyan]▷[/cyan] bench               [green]✓[/green]   [dim]1m 35s[/dim]\n"
-                "  [cyan]▷[/cyan] quality-test        [dim]–[/dim]   [dim]not run[/dim]\n"
-                "  [cyan]▷[/cyan] soak-test           [dim]–[/dim]   [dim]not run[/dim]\n"
-                "  [cyan]▷[/cyan] rebench-full        [dim]–[/dim]   [dim]not run[/dim]",
-                id="run-ladder",
-            )
-            yield Static(
-                "[bold]Extra tools[/bold]  [dim](illustrative)[/dim]\n\n"
-                "  [cyan]▷[/cyan] quality-baseline    [dim]–[/dim]   [dim]regression diff vs baseline[/dim]\n"
-                "  [cyan]▷[/cyan] bench-agentic       [dim]–[/dim]   [dim]multi-turn prefill stress[/dim]\n"
-                "  [cyan]▷[/cyan] stream-toolcall-probe  [dim]–[/dim]   [dim]silent streaming check[/dim]",
-                id="run-extras",
-            )
-            yield Static(
-                "[dim]Output  (select a step above and press ⏎ to run — Phase 4)[/dim]\n\n"
-                "  [dim]…[/dim]",
-                id="run-output",
-            )
-            yield Label("[dim]Not wired — Phase 4[/dim]", id="run-phase-note")
+        yield Label("Run  [dim](⏎ launches the selected step — confirm-gated)[/dim]", id="run-heading")
+        t: DataTable = DataTable(id="run-ladder-table", zebra_stripes=True, show_cursor=True)
+        t.cursor_type = "row"
+        yield t
+        yield Static(_TUNE_GOTCHAS, id="run-gotchas")
+        yield LivePane(id="run-output")
+        yield Label(
+            "[dim]\\[⏎] launch selected (heavy — confirm) · streams below[/dim]",
+            id="run-hint",
+        )
+
+    def on_mount(self) -> None:
+        t = self.query_one("#run-ladder-table", DataTable)
+        t.add_columns("step", "kind", "what it checks")
+        # (kind) in cursor order — the selected row maps back to a run kind.
+        self._kinds: list[str] = []
+        for kind, label, blurb in _RUN_LADDER:
+            t.add_row(f"[cyan]▷[/cyan] {label}", "ladder", blurb)
+            self._kinds.append(kind)
+        for kind, label, blurb in _RUN_EXTRAS:
+            t.add_row(f"[cyan]▷[/cyan] {label}", "extra", blurb)
+            self._kinds.append(kind)
+
+    def selected_kind(self) -> Optional[str]:
+        t = self.query_one("#run-ladder-table", DataTable)
+        idx = t.cursor_row
+        if 0 <= idx < len(self._kinds):
+            return self._kinds[idx]
+        return None
 
 
 class ValidateDoctorPane(Container):
-    """Validate / Doctor tab: health/estate/profile cards (live health line)."""
+    """Validate / Doctor tab: real health / diagnose-estate / diagnose-profile
+    cards from ``CockpitData.doctor()``.
+
+    The health line also updates live from the Estate poll (``populate``); the
+    estate + profile cards fill from the dedicated ``doctor()`` read (``r`` /
+    on entering the tab) since diagnose-estate / diagnose-profile are heavier
+    reads than the per-poll health probe."""
 
     DEFAULT_CSS = """
     ValidateDoctorPane {
+        height: 1fr;
+    }
+    ValidateDoctorPane #doctor-scroll {
         height: 1fr;
         padding: 1 2;
     }
@@ -1090,55 +1237,264 @@ class ValidateDoctorPane(Container):
         color: $accent;
         margin-bottom: 1;
     }
-    ValidateDoctorPane #doctor-phase-note {
+    ValidateDoctorPane #doctor-hint {
         color: $text-muted;
         margin-top: 1;
     }
     """
 
     def compose(self) -> ComposeResult:
-        yield Label("Doctor", id="doctor-heading")
-        with Container(classes="doctor-card", id="doctor-card-health"):
-            yield Label("health.sh", classes="doctor-card-title")
-            yield Static("[dim]reading health.sh…[/dim]", id="doctor-health-body")
-        with Container(classes="doctor-card", id="doctor-card-estate"):
-            yield Label("diagnose-estate", classes="doctor-card-title")
-            yield Static("[dim](illustrative — Phase 4)[/dim]", id="doctor-estate-body")
-        with Container(classes="doctor-card", id="doctor-card-profile"):
-            yield Label("diagnose-profile", classes="doctor-card-title")
-            yield Static("[dim](illustrative — Phase 4)[/dim]", id="doctor-profile-body")
-        yield Label(
-            "[dim]health line is live; estate / profile cards land in Phase 4[/dim]",
-            id="doctor-phase-note",
-        )
+        with ScrollableContainer(id="doctor-scroll"):
+            yield Label("Doctor  [dim](r refreshes — runs the three diagnose reads)[/dim]", id="doctor-heading")
+            with Container(classes="doctor-card", id="doctor-card-health"):
+                yield Label("health.sh", classes="doctor-card-title")
+                yield Static("[dim]reading health.sh…[/dim]", id="doctor-health-body")
+            with Container(classes="doctor-card", id="doctor-card-estate"):
+                yield Label("diagnose-estate", classes="doctor-card-title")
+                yield Static("[dim]reading diagnose-estate…[/dim]", id="doctor-estate-body")
+            with Container(classes="doctor-card", id="doctor-card-profile"):
+                yield Label("diagnose-profile", classes="doctor-card-title")
+                yield Static("[dim]reading diagnose-profile…[/dim]", id="doctor-profile-body")
+            yield Label(
+                "[dim]all three legs are READ-only (safe to run live)[/dim]",
+                id="doctor-hint",
+            )
 
     def populate(self, state: EstateState) -> None:
-        dr = state.doctor
+        """Live health line from the Estate poll (the cheap per-poll probe)."""
+        self._render_health(state.doctor)
+
+    def _render_health(self, dr) -> None:
         body = self.query_one("#doctor-health-body", Static)
         if not dr.reachable:
             body.update("[red]✗[/red]  API not reachable")
             return
         glyph = "[green]✓[/green]" if dr.serving else "[yellow]○[/yellow]"
-        body.update(f"{glyph}  {dr.summary}")
+        line = f"{glyph}  {dr.summary}"
+        body.update(line)
+
+    def populate_report(self, report: DoctorReport) -> None:
+        """Full Doctor read — health + diagnose-estate + diagnose-profile cards."""
+        self._render_health(report.health)
+        self._render_estate(report.estate)
+        self._render_profile(report.profile)
+
+    def _render_estate(self, est) -> None:
+        body = self.query_one("#doctor-estate-body", Static)
+        if est.error:
+            body.update(f"[red]✗[/red]  {est.error}")
+            return
+        verdict_color = {"GREEN": "green", "AMBER": "yellow", "YELLOW": "yellow", "RED": "red"}.get(
+            est.summary.upper(), "dim"
+        )
+        lines = [
+            f"  {est.summary_glyph} [{verdict_color}]{est.summary or '—'}[/{verdict_color}]"
+            f"  ([{'green' if est.valid else 'red'}]{'valid' if est.valid else 'invalid'}[/])",
+            f"  instances   {est.instances_valid}/{est.instance_count} fit"
+            f"   ·   cross-checks {'[green]ok[/green]' if est.cross_checks_ok else '[red]fail[/red]'}",
+            f"  estate file [dim]{est.estate_file or '—'}[/dim]"
+            f"   ·   live {'yes' if est.live else 'no'}",
+        ]
+        body.update("\n".join(lines))
+
+    def _render_profile(self, tri) -> None:
+        body = self.query_one("#doctor-profile-body", Static)
+        if tri is None:
+            body.update("[dim]no target slug — serve a model or pick one in Discover to triage[/dim]")
+            return
+        if tri.error and not tri.steps:
+            body.update(f"[red]✗[/red]  {tri.error}")
+            return
+        verdict_color = {"GREEN": "green", "AMBER": "yellow", "YELLOW": "yellow", "RED": "red"}.get(
+            tri.summary.upper(), "dim"
+        )
+        lines = [
+            f"  [bold]{tri.slug}[/bold]   {tri.summary_glyph} "
+            f"[{verdict_color}]{tri.summary or '—'}[/{verdict_color}]"
+            f"   ({tri.passed}/{len(tri.steps)} steps)",
+        ]
+        step_glyph = {"passed": "[green]✓[/green]", "failed": "[red]✗[/red]", "warn": "[yellow]⚠[/yellow]"}
+        for s in tri.steps:
+            g = step_glyph.get(s.status, "·")
+            lines.append(f"    {g} [{s.num}/{s.total}] {s.name}")
+        body.update("\n".join(lines))
 
 
 class ValidateBenchmarksPane(Container):
-    """Validate / Benchmarks tab — illustrative; real corpus in Phase 4."""
+    """Validate / Benchmarks tab: the real explorer from ``benchmarks_explorer``.
+
+    Rows come from the #249 measurement-record corpus (authoritative TPS/ctx)
+    with a BENCHMARKS.md scrape fallback (carries the 8-pack).  ``/`` filters on
+    (model / engine / topology); ``t`` cycles the sort key (TPS / 8pk / model).
+    A coarse markdown-scraped row is flagged ``md`` in the source column so it's
+    never mistaken for a structured record."""
 
     DEFAULT_CSS = """
     ValidateBenchmarksPane {
         height: 1fr;
     }
-    ValidateBenchmarksPane #bench-heading {
+    ValidateBenchmarksPane #bmk-heading {
         text-style: bold;
         padding: 0 1;
         margin: 0 1 0 1;
     }
-    ValidateBenchmarksPane #bench-table {
-        height: 1fr;
-        margin: 0 1 1 1;
+    ValidateBenchmarksPane #bmk-status {
+        height: 1;
+        color: $text-muted;
+        padding: 0 1;
+        margin: 0 1;
     }
-    ValidateBenchmarksPane #bench-phase-note {
+    ValidateBenchmarksPane Input#bmk-filter {
+        height: 3;
+        margin: 0 1;
+    }
+    ValidateBenchmarksPane #bmk-table {
+        height: 1fr;
+        margin: 0 1 0 1;
+    }
+    ValidateBenchmarksPane #bmk-hint {
+        padding: 0 1;
+        margin: 0 1;
+        color: $text-muted;
+    }
+    """
+
+    # Sort keys cycled by [t].  (label, key-fn) — None TPS sorts last.
+    _SORT_KEYS = ("tps", "8pk", "model")
+
+    def compose(self) -> ComposeResult:
+        yield Label("Benchmarks", id="bmk-heading")
+        yield Label("Loading benchmarks…", id="bmk-status")
+        # Filter Input is mounted lazily on first toggle (toggle_filter) rather
+        # than shipped display:none — keeps the inactive-tab tree minimal.
+        bt: DataTable = DataTable(id="bmk-table", zebra_stripes=True, show_cursor=True)
+        bt.cursor_type = "row"
+        yield bt
+        yield Label(
+            "[dim]\\[/] filter   \\[t] sort (TPS / 8pk / model)   "
+            "* = BENCHMARKS.md scrape[/dim]",
+            id="bmk-hint",
+        )
+
+    def on_mount(self) -> None:
+        t = self.query_one("#bmk-table", DataTable)
+        t.add_columns("Model", "Engine", "Topo", "TPS (n/c)", "ctx", "8pk", "src")
+        self._rows: list[BenchRow] = []
+        self._filter: str = ""
+        self._sort: str = "tps"
+
+    def populate(self, rows: list[BenchRow], error: Optional[str]) -> None:
+        status = self.query_one("#bmk-status", Label)
+        if error and not rows:
+            self._rows = []
+            self.query_one("#bmk-table", DataTable).clear()
+            status.update(f"[yellow]{error}[/yellow]")
+            return
+        self._rows = list(rows)
+        self._render_table()
+
+    def _render_table(self) -> None:
+        # NB: named ``_render_table`` (NOT ``_render``) — ``Widget._render`` is a
+        # Textual internal that must return a Visual; shadowing it with a
+        # table-rebuild that returns None makes the pane render a None visual and
+        # crashes the whole app when the tab is shown.
+        status = self.query_one("#bmk-status", Label)
+        t = self.query_one("#bmk-table", DataTable)
+        t.clear()
+        rows = self._sorted(self._filtered())
+        for r in rows:
+            tps = r.tps_label
+            src = "md" if r.source == "benchmarks.md" else r.source or "—"
+            if r.source == "benchmarks.md" and tps != "—":
+                tps = f"{tps}*"
+            t.add_row(
+                r.model or "—",
+                r.engine or "—",
+                r.topology or "—",
+                tps,
+                r.max_ctx or "—",
+                r.quality_label,
+                src,
+            )
+        sort_label = {"tps": "TPS", "8pk": "8pk", "model": "model"}[self._sort]
+        if self._filter:
+            status.update(
+                f"{len(rows)} / {len(self._rows)} rows  ·  filter {self._filter!r}  ·  sort {sort_label}"
+            )
+        else:
+            status.update(f"{len(self._rows)} benchmark rows  ·  sort {sort_label}")
+
+    def _filtered(self) -> list[BenchRow]:
+        if not self._filter:
+            return self._rows
+        f = self._filter.lower()
+        return [
+            r for r in self._rows
+            if f in f"{r.model} {r.engine} {r.topology}".lower()
+        ]
+
+    def _sorted(self, rows: list[BenchRow]) -> list[BenchRow]:
+        if self._sort == "model":
+            return sorted(rows, key=lambda r: (r.model, r.engine, r.topology))
+        if self._sort == "8pk":
+            # "109/150" → 109; missing sorts last.
+            def q(r: BenchRow) -> int:
+                if not r.quality_8pk:
+                    return -1
+                head = r.quality_8pk.split("/")[0].strip()
+                return int(head) if head.isdigit() else -1
+            return sorted(rows, key=q, reverse=True)
+        # default: code TPS desc, None last.
+        return sorted(rows, key=lambda r: (r.code_tps if r.code_tps is not None else -1.0), reverse=True)
+
+    def set_filter(self, text: str) -> None:
+        self._filter = (text or "").strip()
+        self._render_table()
+
+    def cycle_sort(self) -> None:
+        i = self._SORT_KEYS.index(self._sort)
+        self._sort = self._SORT_KEYS[(i + 1) % len(self._SORT_KEYS)]
+        self._render_table()
+
+    def toggle_filter(self) -> None:
+        """Mount/unmount the filter Input on toggle — it only exists while the
+        filter is open (keeps the pane tree minimal otherwise)."""
+        existing = self.query("#bmk-filter")
+        if existing:
+            existing.first(Input).remove()
+            self.query_one("#bmk-table", DataTable).focus()
+            return
+        inp = Input(placeholder="filter model / engine / topology…", id="bmk-filter")
+        self.mount(inp, before=self.query_one("#bmk-table", DataTable))
+        inp.focus()
+
+
+class ValidateEvidencePane(Container):
+    """Validate / Evidence tab: real ``results/rebench/<tag>/`` run list from
+    ``evidence_list()``; ``⏎`` opens the paste-ready report (``evidence_report``)
+    in a modal (reuses the history_view pattern), ``s`` stages the gated
+    submit-to-localmaxxing for the selected tag (confirm modal; never auto)."""
+
+    DEFAULT_CSS = """
+    ValidateEvidencePane {
+        height: 1fr;
+    }
+    ValidateEvidencePane #evidence-heading {
+        text-style: bold;
+        padding: 0 1;
+        margin: 0 1 0 1;
+    }
+    ValidateEvidencePane #evidence-status {
+        height: 1;
+        color: $text-muted;
+        padding: 0 1;
+        margin: 0 1;
+    }
+    ValidateEvidencePane #evidence-table {
+        height: 1fr;
+        margin: 0 1 0 1;
+    }
+    ValidateEvidencePane #evidence-hint {
         padding: 0 1;
         margin: 0 1;
         color: $text-muted;
@@ -1146,57 +1502,104 @@ class ValidateBenchmarksPane(Container):
     """
 
     def compose(self) -> ComposeResult:
+        yield Label("Evidence", id="evidence-heading")
+        yield Label("Loading run tags…", id="evidence-status")
+        et: DataTable = DataTable(id="evidence-table", zebra_stripes=True, show_cursor=True)
+        et.cursor_type = "row"
+        yield et
         yield Label(
-            "Benchmarks  [dim](illustrative — real data via §5.2 corpus · Phase 4)[/dim]",
-            id="bench-heading",
+            "[dim]\\[⏎] open report   \\[s] submit to localmaxxing (gated · never auto)[/dim]",
+            id="evidence-hint",
         )
-        bt: DataTable = DataTable(id="bench-table", zebra_stripes=True, show_cursor=True)
-        bt.cursor_type = "row"
-        yield bt
-        yield Label("[dim]Not wired — Phase 4[/dim]", id="bench-phase-note")
 
     def on_mount(self) -> None:
-        t = self.query_one("#bench-table", DataTable)
-        t.add_columns("Model", "Engine", "Topo", "TPS (n/c)", "ctx", "8pk", "src")
-        t.add_row("qwen3.6-27b", "vllm", "dual", "[dim]174 / 42[/dim]", "295K", "[dim]109[/dim]", "[dim]mock[/dim]")
-        t.add_row("qwen3.6-27b", "beellama", "dual", "[dim]155 / 38[/dim]", "102K", "[dim]107[/dim]", "[dim]mock[/dim]")
-        t.add_row("gemma-4-31b", "vllm", "dual", "[dim]112 / 29[/dim]", "192K", "[dim]103[/dim]", "[dim]mock[/dim]")
-        t.add_row("qwen3.6-35b-a3b", "vllm", "dual", "[dim]178 / 44[/dim]", "262K", "[dim]90[/dim]", "[dim]mock[/dim]")
+        t = self.query_one("#evidence-table", DataTable)
+        t.add_columns("tag", "date", "report", "internal", "soak", "TL;DR")
+        self._tags: list[EvidenceTag] = []
+
+    def populate(self, tags: list[EvidenceTag]) -> None:
+        status = self.query_one("#evidence-status", Label)
+        t = self.query_one("#evidence-table", DataTable)
+        t.clear()
+        self._tags = list(tags)
+        if not tags:
+            status.update("[dim]no runs under results/rebench/[/dim]")
+            t.add_row("[dim]—[/dim]", "—", "—", "—", "—", "—")
+            return
+        for et in tags:
+            yn = lambda b: "[green]✓[/green]" if b else "[dim]·[/dim]"
+            tldr = (et.tldr[:48] + "…") if len(et.tldr) > 49 else (et.tldr or "—")
+            t.add_row(et.tag, et.date or "—", yn(et.has_report), yn(et.has_internal), yn(et.has_soak), tldr)
+        status.update(f"{len(tags)} run tag(s) under results/rebench/")
+
+    def selected_tag(self) -> Optional[EvidenceTag]:
+        t = self.query_one("#evidence-table", DataTable)
+        idx = t.cursor_row
+        if 0 <= idx < len(self._tags):
+            return self._tags[idx]
+        return None
 
 
-class ValidateEvidencePane(Container):
-    """Validate / Evidence tab — illustrative; real run tags in Phase 4."""
+# ── Evidence report modal (reuses the history_view read pattern) ─────────────────
+
+
+class EvidenceReportScreen(ModalScreen):
+    """Paste-ready report overlay for one rebench tag (READ — reads results)."""
 
     DEFAULT_CSS = """
-    ValidateEvidencePane {
-        height: 1fr;
+    EvidenceReportScreen {
+        align: center middle;
+    }
+    EvidenceReportScreen > Vertical {
+        width: 96;
+        height: 80%;
+        border: thick $accent;
+        background: $surface;
         padding: 1 2;
     }
-    ValidateEvidencePane #evidence-heading {
+    EvidenceReportScreen .evidence-report-title {
         text-style: bold;
+        color: $accent;
         margin-bottom: 1;
     }
-    ValidateEvidencePane #evidence-list {
-        border: solid $primary;
-        padding: 1 2;
-        height: auto;
-    }
-    ValidateEvidencePane #evidence-phase-note {
-        color: $text-muted;
-        margin-top: 1;
+    EvidenceReportScreen #evidence-report-scroll {
+        height: 1fr;
     }
     """
 
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+    ]
+
+    def __init__(self, tag: str, **kwargs):
+        super().__init__(**kwargs)
+        self._tag = tag
+
     def compose(self) -> ComposeResult:
-        yield Label("Evidence  [dim](illustrative — Phase 4)[/dim]", id="evidence-heading")
-        yield Static(
-            "[bold]Past runs[/bold]  [dim](example tags)[/dim]\n\n"
-            "  results/rebench/[cyan]vllm-dual-20260618[/cyan]  ·  2026-06-18  ·  [green]PASS[/green]\n"
-            "  results/rebench/[cyan]vllm-dual-20260615[/cyan]  ·  2026-06-15  ·  [green]PASS[/green]\n"
-            "  [dim](illustrative — Phase 4)[/dim]",
-            id="evidence-list",
-        )
-        yield Label("[dim]Not wired — Phase 4[/dim]", id="evidence-phase-note")
+        with Vertical():
+            yield Label(f"Report · {self._tag}", classes="evidence-report-title")
+            with ScrollableContainer(id="evidence-report-scroll"):
+                yield Static("Generating report (rebench-report.py — reads results)…", id="evidence-report-body")
+            yield Label("[dim]Esc to close[/dim]")
+
+    def on_mount(self) -> None:
+        # Load the report once the modal is mounted (so set_report's query
+        # resolves) — mirrors ConfirmActionScreen's reconcile-on-mount.
+        self.app.run_evidence_report(self, self._tag)  # type: ignore[attr-defined]
+
+    def set_report(self, report: EvidenceReport) -> None:
+        body = self.query_one("#evidence-report-body", Static)
+        if report.error and not report.body:
+            body.update(f"[red]report unavailable:[/red] {report.error}")
+            return
+        # Render the markdown body verbatim (escape Rich markup so [..] in the
+        # report text isn't parsed as a tag).
+        from rich.markup import escape
+
+        body.update(escape(report.body))
+
+    def action_dismiss(self) -> None:
+        self.app.pop_screen()
 
 
 # ── Mode switcher (left rail) ─────────────────────────────────────────────────────
@@ -1326,7 +1729,7 @@ class ModeSwitcher(Static):
 
 
 class CockpitApp(App):
-    """club3090 serve cockpit — Phase 3 (wired)."""
+    """club3090 serve cockpit — all four modes wired to the live data layer."""
 
     TITLE = "club3090 cockpit"
     SUB_TITLE = "wired"
@@ -1346,11 +1749,20 @@ class CockpitApp(App):
         Binding("d", "set_default", "Set default", show=False),
         Binding("D", "clear_default", "Clear default", show=False),
         # Estate · Containers — logs (read) + restart/stop (gated writes).
+        # [s] is context-sensitive: restart (Estate · Containers) vs submit
+        # (Validate · Evidence) — routed by mode/tab in action_s_key.
         Binding("l", "container_logs", "Logs", show=False),
-        Binding("s", "container_restart", "Restart", show=False),
+        Binding("s", "s_key", "Restart / Submit", show=False),
         Binding("x", "container_stop", "Stop", show=False),
+        Binding("X", "container_rm", "Remove", show=False),
         # Estate · Orchestration — stop all (estate down, gated write).
         Binding("o", "estate_off", "Stop all", show=False),
+        # Estate · Orchestration — power cap + prune (gated rig writes).
+        Binding("c", "power_cap_toggle", "Cap on/off", show=False),
+        Binding("w", "power_cap_sweep", "Cap sweep", show=False),
+        Binding("p", "prune_images", "Prune", show=False),
+        # Estate · Containers / Validate — context-sensitive read keys.
+        Binding("t", "context_t", "Top / Sort", show=False),
     ]
 
     CSS = """
@@ -1395,6 +1807,12 @@ class CockpitApp(App):
         self._variants: list[VariantRow] = []
         # The slug staged for serve (selected from the catalog).
         self._staged_entry: Optional[CatalogEntry] = None
+        # The live target (running engine), captured from the last estate poll,
+        # used to point Doctor's profile-triage + the validation launches at the
+        # currently-serving model.  None until a poll resolves a running engine.
+        self._target_slug: str = ""
+        self._target_model: str = ""
+        self._target_url: str = ""
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -1458,8 +1876,17 @@ class CockpitApp(App):
 
     @work(exclusive=True, group="estate")
     async def load_estate(self) -> None:
-        """Poll the live estate snapshot + push into the orch/doctor panes + rail."""
+        """Poll the live estate snapshot + push into the orch/doctor panes + rail.
+
+        Also captures the live target (matched slug / model / url) so Doctor's
+        profile-triage and the validation launches point at the running model,
+        and reads the power-cap status (a safe READ) for the orch pane."""
         state = await self._data.estate_state(variants=self._variants or None)
+        # Capture the live target for profile-triage / validation launches.
+        self._target_slug = state.matched_slug or ""
+        tgt = state.target
+        self._target_model = getattr(tgt, "model", "") or ""
+        self._target_url = getattr(tgt, "url", "") or ""
         try:
             self.query_one("#estate-orch-pane", EstateOrchPane).populate(state)
         except Exception:
@@ -1476,6 +1903,43 @@ class CockpitApp(App):
             pass
         try:
             self.query_one("#rail-status", RailStatus).update_from_state(state)
+        except Exception:
+            pass
+        # Power-cap status (READ) for the orch pane.
+        st = await self._data.power_cap_get()
+        try:
+            self.query_one("#estate-orch-pane", EstateOrchPane).populate_power_cap(st)
+        except Exception:
+            pass
+
+    # ── Validate-mode loaders ──────────────────────────────────────────────────────
+
+    @work(exclusive=True, group="doctor")
+    async def load_doctor(self) -> None:
+        """Run the full Doctor read (health + diagnose-estate + diagnose-profile)
+        and push it into the Doctor pane.  ALL three legs are READ-only."""
+        slug = self._target_slug or (self._staged_entry.slug if self._staged_entry else None)
+        report = await self._data.doctor(url=self._target_url or None, slug=slug)
+        try:
+            self.query_one("#validate-doctor-pane", ValidateDoctorPane).populate_report(report)
+        except Exception:
+            pass
+
+    @work(exclusive=True, group="benchmarks")
+    async def load_benchmarks(self) -> None:
+        """Load the benchmarks explorer rows (corpus → BENCHMARKS.md fallback)."""
+        rows, error = await self._data.benchmarks_explorer()
+        try:
+            self.query_one("#validate-benchmarks-pane", ValidateBenchmarksPane).populate(rows, error)
+        except Exception:
+            pass
+
+    @work(exclusive=True, group="evidence")
+    async def load_evidence(self) -> None:
+        """Enumerate the rebench run tags for the Evidence pane (filesystem READ)."""
+        tags = await self._data.evidence_list()
+        try:
+            self.query_one("#validate-evidence-pane", ValidateEvidencePane).populate(tags)
         except Exception:
             pass
 
@@ -1590,6 +2054,17 @@ class CockpitApp(App):
         # Estate is live — poll on entry.
         if index == 2:
             self.load_estate()
+        # Validate is live too — load the doctor/benchmarks/evidence reads.
+        elif index == 3:
+            self._load_validate()
+
+    def _load_validate(self) -> None:
+        """Kick the three Validate read workers (doctor / benchmarks / evidence).
+        Each is best-effort and independent — a failing leg doesn't block the
+        others.  The Run pane is launch-driven (no background read)."""
+        self.load_doctor()
+        self.load_benchmarks()
+        self.load_evidence()
 
     # ── Actions ──────────────────────────────────────────────────────────────────────
 
@@ -1609,6 +2084,8 @@ class CockpitApp(App):
         """Re-read the live data layer for the active mode."""
         if self._active_mode == 2:
             self.load_estate()
+        elif self._active_mode == 3:
+            self._load_validate()
         else:
             try:
                 self.query_one("#catalog-pane", CatalogPane).query_one(
@@ -1619,11 +2096,32 @@ class CockpitApp(App):
             self.load_catalog()
 
     def action_filter_catalog(self) -> None:
+        """[/] filters the catalog (Discover) or the benchmarks explorer
+        (Validate · Benchmarks), depending on the active mode/tab."""
         if self._active_mode == 0:
             try:
                 self.query_one("#catalog-pane", CatalogPane).toggle_filter()
             except Exception:
                 pass
+        elif self._active_mode == 3 and self._active_validate_tab() == "tab-benchmarks":
+            try:
+                self.query_one(
+                    "#validate-benchmarks-pane", ValidateBenchmarksPane
+                ).toggle_filter()
+            except Exception:
+                pass
+
+    def _active_validate_tab(self) -> str:
+        try:
+            return self.query_one("#validate-tabs", TabbedContent).active
+        except Exception:
+            return ""
+
+    def _active_estate_tab(self) -> str:
+        try:
+            return self.query_one("#estate-tabs", TabbedContent).active
+        except Exception:
+            return ""
 
     def action_explain(self) -> None:
         """Open the explain detail modal for the selected catalog slug."""
@@ -1648,7 +2146,48 @@ class CockpitApp(App):
         elif self._active_mode == 2:
             self._estate_primary()
         else:
-            self.notify("Run actions land in Phase 4.", title="Validate", severity="information", timeout=3)
+            self._validate_primary()
+
+    def _validate_primary(self) -> None:
+        """⏎ in Validate — context-specific per tab:
+          - Run        : launch the selected ladder/extra step (confirm-gated).
+          - Evidence   : open the paste-ready report for the selected tag.
+          - Doctor / Benchmarks have no primary action (read-only views)."""
+        tab = self._active_validate_tab()
+        if tab == "tab-run":
+            self._run_validation_selected()
+        elif tab == "tab-evidence":
+            self._open_evidence_report()
+
+    def _run_validation_selected(self) -> None:
+        """Stage the selected Run step as a confirm-gated validation launch."""
+        try:
+            kind = self.query_one("#validate-run-pane", ValidateRunPane).selected_kind()
+        except Exception:
+            kind = None
+        if kind is None:
+            self.notify("No validation step selected.", title="Validate", severity="warning", timeout=3)
+            return
+        slug = self._target_slug or (self._staged_entry.slug if self._staged_entry else None)
+        plan = self._data.validation_plan(
+            kind,
+            model=self._target_model or None,
+            url=self._target_url or None,
+            slug=slug,
+        )
+        self.push_screen(ConfirmActionScreen(plan, on_confirm=lambda p: self.run_validation_launch(kind)))
+
+    def _open_evidence_report(self) -> None:
+        try:
+            tag = self.query_one("#validate-evidence-pane", ValidateEvidencePane).selected_tag()
+        except Exception:
+            tag = None
+        if tag is None:
+            self.notify("No run tag selected.", title="Evidence", severity="warning", timeout=3)
+            return
+        # The screen loads its own report on mount (run_evidence_report), so the
+        # set_report query resolves against a fully-mounted modal.
+        self.push_screen(EvidenceReportScreen(tag.tag))
 
     def _discover_primary(self) -> None:
         """⏎ in Discover · Catalog: stage the selected slug and jump to Serve."""
@@ -1745,8 +2284,18 @@ class CockpitApp(App):
             pass
         self.stream_container_logs(con.name)
 
+    def action_s_key(self) -> None:
+        """[s] is context-sensitive:
+          - Estate · Containers : gated `docker restart <name>`.
+          - Validate · Evidence : gated submit-to-localmaxxing for the tag.
+        Other contexts ignore it."""
+        if self._active_mode == 3 and self._active_validate_tab() == "tab-evidence":
+            self.action_evidence_submit()
+            return
+        self.action_container_restart()
+
     def action_container_restart(self) -> None:
-        """[s] in Estate · Containers: gated `docker restart <name>`."""
+        """Gated `docker restart <name>` (Estate · Containers)."""
         self._container_write("restart")
 
     def action_container_stop(self) -> None:
@@ -1793,6 +2342,162 @@ class CockpitApp(App):
             return
         for ln in res.get("lines", []):
             live.append_line(ln)
+
+    def action_container_rm(self) -> None:
+        """[X] in Estate · Containers: reconcile-gated `docker rm <name>`.
+
+        Removing a container frees a GPU it held → the plan requires_reconcile,
+        so it routes through the SAME ConfirmActionScreen → dispatch_action gate
+        as stop.  rm of a live container needs Force (which adds -f)."""
+        if self._active_mode != 2:
+            return
+        con = self._selected_container()
+        if con is None:
+            self.notify("No container selected to remove.", title="Containers", severity="warning", timeout=3)
+            return
+        plan = self._data.container_rm(con.name)
+        self.push_screen(ConfirmActionScreen(plan))
+
+    def action_context_t(self) -> None:
+        """[t] is context-sensitive:
+          - Estate · Containers : read `docker top` for the selected container.
+          - Validate · Benchmarks: cycle the explorer sort key.
+        Other contexts ignore it."""
+        if self._active_mode == 2 and self._active_estate_tab() == "tab-containers":
+            self._container_top()
+        elif self._active_mode == 3 and self._active_validate_tab() == "tab-benchmarks":
+            try:
+                self.query_one("#validate-benchmarks-pane", ValidateBenchmarksPane).cycle_sort()
+            except Exception:
+                pass
+
+    def _container_top(self) -> None:
+        con = self._selected_container()
+        if con is None:
+            self.notify("No container selected.", title="Top", severity="warning", timeout=3)
+            return
+        try:
+            self.query_one("#drill-tabs", TabbedContent).active = "drill-tab-stats"
+        except Exception:
+            pass
+        self.read_container_top(con.name)
+
+    @work(group="container-top")
+    async def read_container_top(self, name: str) -> None:
+        """docker top <name> (READ) → the Top drill tab.  Also fills the Config
+        tab from the cached registry row matched to the selected container."""
+        top = await self._data.container_top(name)
+        con = self._selected_container()
+        variant = None
+        if con is not None and con.slug:
+            variant = next((v for v in self._variants if getattr(v, "slug", "") == con.slug), None)
+        try:
+            pane = self.query_one("#estate-containers-pane", EstateContainersPane)
+            pane.populate_top(top)
+            pane.populate_config(con, variant)
+        except Exception:
+            pass
+
+    # ── Validate · Run launch (streams via run_validation — MOCKED in tests) ──────────
+
+    @work(exclusive=True, group="validation-run")
+    async def run_validation_launch(self, kind: str) -> None:
+        """Launch a confirmed validation step, streamed into the Run LivePane.
+
+        ⚠️  WIRED-BUT-MOCK-ONLY.  These scripts stress / hit a serving model and
+        are heavy; the write runner is NEVER executed live this phase — conftest
+        blocks the real spawn and tests inject a FakeWriteRunner."""
+        live = self._run_output_pane()
+        if live is not None:
+            live.clear_log()
+            live.append_line(f"[green]▶ launching[/green] {kind} (streams below)")
+        slug = self._target_slug or (self._staged_entry.slug if self._staged_entry else None)
+
+        def _on_line(text: str) -> None:
+            if live is not None:
+                live.append_line(text)
+
+        await self._data.run_validation(
+            kind,
+            model=self._target_model or None,
+            url=self._target_url or None,
+            slug=slug,
+            on_line=_on_line,
+        )
+        self.notify(f"{kind} launched.", title="Validate", severity="information", timeout=4)
+
+    def _run_output_pane(self) -> Optional[LivePane]:
+        try:
+            return self.query_one("#run-output", LivePane)
+        except Exception:
+            return None
+
+    # ── Validate · Evidence report (READ — reads results) ─────────────────────────────
+
+    @work(group="evidence-report")
+    async def run_evidence_report(self, screen: EvidenceReportScreen, tag: str) -> None:
+        """Generate (reads results) + load the paste-ready report for a tag."""
+        report = await self._data.evidence_report(tag)
+        try:
+            screen.set_report(report)
+        except Exception:
+            pass
+
+    def action_evidence_submit(self) -> None:
+        """[s] in Validate · Evidence: stage the gated submit-to-localmaxxing for
+        the selected run tag.  OUTWARD-FACING NETWORK WRITE — confirm-gated,
+        NEVER auto-fired; the network is mocked in tests."""
+        if self._active_mode != 3 or self._active_validate_tab() != "tab-evidence":
+            return
+        try:
+            tag = self.query_one("#validate-evidence-pane", ValidateEvidencePane).selected_tag()
+        except Exception:
+            tag = None
+        if tag is None:
+            self.notify("No run tag selected.", title="Evidence", severity="warning", timeout=3)
+            return
+        plan = self._data.submit_bench(tag.tag)
+        self.push_screen(ConfirmActionScreen(plan))
+
+    # ── Estate · Orchestration: power-cap + prune (gated rig writes) ───────────────────
+
+    def action_power_cap_toggle(self) -> None:
+        """[c] in Estate · Orchestration: confirm-gated power-cap on/off.
+
+        Reads the current cap state to decide the toggle direction (on→off /
+        off→on), then routes the WRITE through the standard confirm gate.  A
+        cap write is a rig mutation — NEVER auto-fired."""
+        if self._active_mode != 2 or self._active_estate_tab() != "tab-orchestration":
+            return
+        self._toggle_power_cap()
+
+    @work(group="power-cap-toggle")
+    async def _toggle_power_cap(self) -> None:
+        st = await self._data.power_cap_get()
+        # If any GPU is below its default, treat the rig as "capped" → turn off.
+        capped = any(
+            g.limit_w is not None and g.default_w is not None and g.limit_w < g.default_w
+            for g in st.gpus
+        )
+        target = "off" if capped else "on"
+        plan = self._data.power_cap_set(target)
+        self.push_screen(ConfirmActionScreen(plan))
+
+    def action_power_cap_sweep(self) -> None:
+        """[w] in Estate · Orchestration: confirm-gated power-cap sweep (heavy +
+        mutating — runs benches at each cap).  NEVER auto-fired."""
+        if self._active_mode != 2 or self._active_estate_tab() != "tab-orchestration":
+            return
+        plan = self._data.power_cap_sweep()
+        self.push_screen(ConfirmActionScreen(plan))
+
+    def action_prune_images(self) -> None:
+        """[p] in Estate · Orchestration: confirm-gated image prune (DESTRUCTIVE —
+        deletes unreferenced images).  NEVER auto-fired."""
+        if self._active_mode != 2 or self._active_estate_tab() != "tab-orchestration":
+            return
+        plan = self._data.prune()
+        self.push_screen(ConfirmActionScreen(plan))
 
     # ── Estate stop-all (Estate · Orchestration) ──────────────────────────────────────
 
@@ -1843,6 +2548,13 @@ class CockpitApp(App):
                 ).focus()
             except Exception:
                 pass
+        elif event.input.id == "bmk-filter":
+            try:
+                pane = self.query_one("#validate-benchmarks-pane", ValidateBenchmarksPane)
+                pane.set_filter(event.value)
+                pane.query_one("#bmk-table", DataTable).focus()
+            except Exception:
+                pass
         elif event.input.id in ("byo-url-input", "byo-profile-input"):
             self._trigger_byo()
 
@@ -1850,6 +2562,13 @@ class CockpitApp(App):
         if event.input.id == "catalog-filter":
             try:
                 self.query_one("#catalog-pane", CatalogPane).set_filter(event.value)
+            except Exception:
+                pass
+        elif event.input.id == "bmk-filter":
+            try:
+                self.query_one(
+                    "#validate-benchmarks-pane", ValidateBenchmarksPane
+                ).set_filter(event.value)
             except Exception:
                 pass
 

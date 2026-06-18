@@ -44,6 +44,7 @@ from club3090_cockpit.app import (
     ValidateDoctorPane,
     ValidateBenchmarksPane,
     ValidateEvidencePane,
+    EvidenceReportScreen,
     RailStatus,
 )
 from club3090_cockpit.services import CockpitData, RunResult
@@ -80,10 +81,17 @@ class FakeRunner:
 
 class FakeWriteRunner:
     """Stand-in for the core SubprocessRunner — records start_raw calls but
-    NEVER spawns a process.  This is the assertion that no live write happens."""
+    NEVER spawns a process.  This is the assertion that no live write happens.
+
+    ``set_callbacks`` mirrors the real runner's signature (the Run pane wires
+    on_line/on_event for the live stream) — it just records them, no spawn."""
 
     def __init__(self):
         self.started: list[dict[str, Any]] = []
+        self.callbacks: dict[str, Any] = {}
+
+    def set_callbacks(self, on_event=None, on_line=None, on_complete=None):
+        self.callbacks = {"on_event": on_event, "on_line": on_line, "on_complete": on_complete}
 
     async def start_raw(self, cmd, env, run_type, parser):
         self.started.append({"cmd": cmd, "run_type": run_type})
@@ -244,6 +252,90 @@ DOCKER_PS_ENGINE = (
 )
 DOCKER_PS_EMPTY = ""
 
+# REAL diagnose-estate.sh --json shape (verified live 2026-06-18).
+DIAGNOSE_ESTATE_JSON = json.dumps(
+    {
+        "estate_file": "/home/u/.club3090/estate.yml",
+        "live": False,
+        "valid": True,
+        "summary": "GREEN",
+        "checks": {
+            "schema": {"ok": True, "schema_version": 1, "instance_count": 2},
+            "per_instance_fits": [
+                {"name": "llama-gpu0", "valid": True},
+                {"name": "llama-gpu1", "valid": True},
+            ],
+            "cross_checks": {"ok": True, "failures": []},
+        },
+    }
+)
+
+# REAL diagnose-profile.sh text shape (verified live): [N/6] steps + verdict.
+DIAGNOSE_PROFILE_TEXT = (
+    "Profile triage: vllm/dual\n"
+    "=========================\n"
+    "[1/6] Compose registry entry exists\n"
+    "  ✓ vllm/dual found (model=qwen3.6-27b)\n"
+    "\n"
+    "[2/6] Cross-references resolve\n"
+    "  ✓ all referenced profiles exist\n"
+    "\n"
+    "[3/6] fits() on canonical scenario\n"
+    "  ✓ valid=true; constraints passed: 15/16\n"
+    "\n"
+    "[4/6] kv-calc projection\n"
+    "  ✓ verdict PASS; budget 22.08 GB\n"
+    "\n"
+    "[5/6] Calibration freshness\n"
+    "  ✓ verified; BENCHMARKS.md\n"
+    "\n"
+    "[6/6] Vendored overlays applied\n"
+    "  ✓ VLLM_IMAGE resolves: vllm/vllm-openai:v0.22.0\n"
+    "\n"
+    "Triage summary: GREEN\n"
+)
+
+# REAL gpu-mode power-cap status shape (verified live): banner + per-GPU rows.
+# GPU0 capped (limit < default), GPU1 uncapped (limit == default).
+POWER_CAP_STATUS = (
+    "\x1b[0;36m═══ GPU Power Limits ═══\x1b[0m\n"
+    "index, power.limit [W], power.default_limit [W], power.min_limit [W], power.max_limit [W]\n"
+    "0, 230.00 W, 370.00 W, 100.00 W, 390.00 W\n"
+    "1, 420.00 W, 420.00 W, 100.00 W, 450.00 W\n"
+)
+
+# docker top — ps-style table (READ).
+DOCKER_TOP = (
+    "UID    PID    PPID   C   STIME   TTY   TIME       CMD\n"
+    "root   1234   1200   9   10:01   ?     00:12:30   python3 -m vllm.entrypoints.openai.api_server\n"
+)
+
+# Minimal BENCHMARKS.md the explorer can scrape (model + topo headers + a row).
+BENCHMARKS_MD = (
+    "# BENCHMARKS\n"
+    "\n"
+    "## Qwen3.6-27B\n"
+    "\n"
+    "### Dual-card (2× RTX 3090, TP=2)\n"
+    "\n"
+    "| Compose | Rig | KV | Max ctx | Narr / Code TPS | PP | VRAM | Date | Notes |\n"
+    "|---|---|---|---|---|---|---|---|---|\n"
+    "| `vllm/dual` | @noonghunna | fp8 | 262K | **174.0 / 42.0** | — | 23.6 GB | 2026-05-30 | 8-pack 109/150 |\n"
+)
+
+# Minimal rebench REPORT.md for the evidence-report read.
+REBENCH_REPORT_MD = (
+    "# Rebench report — vllm-dual-test\n"
+    "\n"
+    "## TL;DR\n"
+    "\n"
+    "- TPS narrative **174.0** / code **42.0**.\n"
+    "\n"
+    "## Meta\n"
+    "\n"
+    "- **Date:** 2026-06-18\n"
+)
+
 
 def fake_responses(**overrides) -> dict[str, RunResult]:
     responses = {
@@ -256,6 +348,11 @@ def fake_responses(**overrides) -> dict[str, RunResult]:
         "estate_cli.py report-state --json": ok(ESTATE_REPORT_FREE),
         "health.sh": ok(HEALTH_SERVING),
         "docker ps": ok(DOCKER_PS_EMPTY),
+        # Phase-4 reads:
+        "diagnose-estate.sh --json": ok(DIAGNOSE_ESTATE_JSON),
+        "diagnose-profile.sh": ok(DIAGNOSE_PROFILE_TEXT),
+        "power-cap status": ok(POWER_CAP_STATUS),
+        "docker top": ok(DOCKER_TOP),
     }
     responses.update(overrides)
     return responses
@@ -267,24 +364,38 @@ def make_app(
     gpus: Optional[list[GpuInfo]] = None,
     target: Optional[ServingTarget] = None,
     write_runner: Optional[FakeWriteRunner] = None,
+    repo_root: Optional[Path] = None,
 ) -> tuple[CockpitApp, FakeRunner, FakeWriteRunner]:
     """Build a CockpitApp wired to a fully-faked CockpitData.
 
     Returns (app, read_runner, write_runner) so tests can assert on calls.
+    ``repo_root`` overrides the fake root for the filesystem-backed reads
+    (benchmarks explorer / evidence list) — seed it with BENCHMARKS.md and a
+    results/rebench/ tree for those panes.
     """
+    root = repo_root or FAKE_REPO_ROOT
     runner = FakeRunner(responses or fake_responses())
     gpus = gpus if gpus is not None else [GpuInfo(index=0, mem_used_mib=1), GpuInfo(index=1, mem_used_mib=1)]
     target = target if target is not None else ServingTarget(gpus=gpus)
     write_runner = write_runner or FakeWriteRunner()
     data = CockpitData(
-        FAKE_REPO_ROOT,
+        root,
         runner=runner,
         detect_endpoint_fn=make_detect(target),
         get_gpu_info_fn=make_gpu_info(gpus),
         write_runner=write_runner,
     )
-    app = CockpitApp(repo_root=FAKE_REPO_ROOT, data=data)
+    app = CockpitApp(repo_root=root, data=data)
     return app, runner, write_runner
+
+
+def seed_repo(root: Path) -> None:
+    """Seed a tmp root with the filesystem state the explorer/evidence read."""
+    (root / "BENCHMARKS.md").write_text(BENCHMARKS_MD, encoding="utf-8")
+    tag_dir = root / "results" / "rebench" / "vllm-dual-test"
+    tag_dir.mkdir(parents=True, exist_ok=True)
+    (tag_dir / "REPORT.md").write_text(REBENCH_REPORT_MD, encoding="utf-8")
+    (tag_dir / "_internal.json").write_text("{}", encoding="utf-8")
 
 
 async def _settle(pilot) -> None:
@@ -955,9 +1066,11 @@ class TestValidatePanes:
         app, _, _ = make_app()
         async with app.run_test(size=(120, 40)) as pilot:
             app.query_one("#validate-run-pane", ValidateRunPane)
-            app.query_one("#run-ladder")
-            app.query_one("#run-extras")
-            app.query_one("#run-output")
+            t = app.query_one("#run-ladder-table", DataTable)
+            # 6 ladder steps + 3 extras = 9 launchable kinds.
+            assert t.row_count == 9
+            app.query_one("#run-gotchas")   # §3.5 tune gotchas surfaced inline
+            app.query_one("#run-output")     # core LivePane for streamed output
 
     @pytest.mark.asyncio
     async def test_validate_doctor_pane_nodes(self):
@@ -982,15 +1095,16 @@ class TestValidatePanes:
         app, _, _ = make_app()
         async with app.run_test(size=(120, 40)) as pilot:
             app.query_one("#validate-benchmarks-pane", ValidateBenchmarksPane)
-            t = app.query_one("#bench-table", DataTable)
-            assert t.row_count == 4
+            t = app.query_one("#bmk-table", DataTable)
+            # Real explorer — empty until the Validate poll fills it (no mock rows).
+            assert t.row_count == 0
 
     @pytest.mark.asyncio
     async def test_validate_evidence_pane_nodes(self):
         app, _, _ = make_app()
         async with app.run_test(size=(120, 40)) as pilot:
             app.query_one("#validate-evidence-pane", ValidateEvidencePane)
-            app.query_one("#evidence-list")
+            app.query_one("#evidence-table", DataTable)
 
 
 # ===========================================================================
@@ -1013,3 +1127,373 @@ class TestPrimaryActionSafe:
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.press("4")
             await pilot.press("enter")
+
+
+# ===========================================================================
+# Validate · Doctor (wired to doctor() — health + estate + profile cards)
+# ===========================================================================
+
+
+class TestValidateDoctorWired:
+    @pytest.mark.asyncio
+    async def test_doctor_cards_populate_from_doctor_read(self):
+        """Entering Validate runs the full Doctor read → estate + profile cards
+        fill from diagnose-estate.sh --json + diagnose-profile.sh (text)."""
+        app, runner, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            await _settle(pilot)
+            estate = str(app.query_one("#doctor-estate-body", Static).render())
+            assert "GREEN" in estate and "2/2" in estate  # 2/2 instances fit
+            assert any("diagnose-estate.sh --json" in " ".join(c) for c in runner.calls)
+
+    @pytest.mark.asyncio
+    async def test_doctor_profile_triage_after_estate_target(self):
+        """When a running engine is detected (matched slug), Doctor triages it
+        via diagnose-profile.sh and renders the 6 steps + verdict."""
+        # A detect target on port 8010 matches vllm/dual in the registry → the
+        # estate poll captures the slug, which the doctor read then triages.
+        gpus = [GpuInfo(index=0, mem_used_mib=1), GpuInfo(index=1, mem_used_mib=1)]
+        target = ServingTarget(container="vllm_qwen36_27b", host_port=8010, gpus=gpus)
+        responses = fake_responses(**{"docker ps": ok(DOCKER_PS_ENGINE)})
+        app, runner, _ = make_app(responses=responses, gpus=gpus, target=target)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("3")            # estate poll → captures target slug
+            await _settle(pilot)
+            assert app._target_slug == "vllm/dual"
+            await pilot.press("4")            # validate → doctor read uses the slug
+            await _settle(pilot)
+            profile = str(app.query_one("#doctor-profile-body", Static).render())
+            assert "GREEN" in profile
+            assert any("diagnose-profile.sh" in " ".join(c) for c in runner.calls)
+
+
+# ===========================================================================
+# Validate · Benchmarks (wired to benchmarks_explorer — filter + sort)
+# ===========================================================================
+
+
+class TestValidateBenchmarksWired:
+    @pytest.mark.asyncio
+    async def test_benchmarks_populate_from_explorer(self, tmp_path):
+        app, _, _ = make_app(repo_root=tmp_path)
+        seed_repo(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            await _settle(pilot)
+            t = app.query_one("#bmk-table", DataTable)
+            assert t.row_count == 1  # the one BENCHMARKS.md scrape row
+            pane = app.query_one("#validate-benchmarks-pane", ValidateBenchmarksPane)
+            assert pane._rows[0].model == "qwen3.6-27b"
+            assert pane._rows[0].quality_8pk == "109/150"
+
+    @pytest.mark.asyncio
+    async def test_benchmarks_filter_narrows(self, tmp_path):
+        app, _, _ = make_app(repo_root=tmp_path)
+        seed_repo(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            await _settle(pilot)
+            pane = app.query_one("#validate-benchmarks-pane", ValidateBenchmarksPane)
+            pane.set_filter("gemma")             # no gemma rows
+            assert app.query_one("#bmk-table", DataTable).row_count == 0
+            pane.set_filter("qwen")
+            assert app.query_one("#bmk-table", DataTable).row_count == 1
+
+    @pytest.mark.asyncio
+    async def test_benchmarks_sort_cycles(self, tmp_path):
+        app, _, _ = make_app(repo_root=tmp_path)
+        seed_repo(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            await _settle(pilot)
+            pane = app.query_one("#validate-benchmarks-pane", ValidateBenchmarksPane)
+            assert pane._sort == "tps"
+            pane.cycle_sort()
+            assert pane._sort == "8pk"
+
+    @pytest.mark.asyncio
+    async def test_benchmarks_explorer_empty_root_surfaces_message(self):
+        """No corpus + no BENCHMARKS.md → an honest 'no data' status, not a crash."""
+        app, _, _ = make_app()  # FAKE_REPO_ROOT has neither
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            await _settle(pilot)
+            status = str(app.query_one("#bmk-status", Label).render()).lower()
+            assert "no benchmark data" in status or "no benchmark" in status
+
+
+# ===========================================================================
+# Validate · Evidence (wired to evidence_list / evidence_report / submit)
+# ===========================================================================
+
+
+class TestValidateEvidenceWired:
+    @pytest.mark.asyncio
+    async def test_evidence_list_populates_from_rebench_dir(self, tmp_path):
+        app, _, _ = make_app(repo_root=tmp_path)
+        seed_repo(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            await _settle(pilot)
+            t = app.query_one("#evidence-table", DataTable)
+            assert t.row_count == 1
+            pane = app.query_one("#validate-evidence-pane", ValidateEvidencePane)
+            assert pane._tags[0].tag == "vllm-dual-test"
+            assert pane._tags[0].date == "2026-06-18"
+
+    @pytest.mark.asyncio
+    async def test_evidence_enter_opens_report_modal(self, tmp_path):
+        app, _, _ = make_app(repo_root=tmp_path)
+        seed_repo(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            await _settle(pilot)
+            app.query_one("#validate-tabs", TabbedContent).active = "tab-evidence"
+            await pilot.pause()
+            app.query_one("#evidence-table", DataTable).move_cursor(row=0)
+            await pilot.press("enter")
+            await _settle(pilot)
+            assert isinstance(app.screen, EvidenceReportScreen)
+            body = str(app.screen.query_one("#evidence-report-body", Static).render())
+            assert "Rebench report" in body
+
+    @pytest.mark.asyncio
+    async def test_evidence_submit_opens_gated_confirm_never_auto(self, tmp_path):
+        """[s] in Evidence stages the OUTWARD submit behind a confirm modal —
+        the network is NEVER auto-fired."""
+        wr = FakeWriteRunner()
+        app, _, _ = make_app(repo_root=tmp_path, write_runner=wr)
+        seed_repo(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            await _settle(pilot)
+            app.query_one("#validate-tabs", TabbedContent).active = "tab-evidence"
+            await pilot.pause()
+            app.query_one("#evidence-table", DataTable).move_cursor(row=0)
+            await pilot.press("s")  # submit
+            await pilot.pause()
+            assert isinstance(app.screen, ConfirmActionScreen)
+            assert app.screen._plan.network is True
+            assert "--auto-submit" in app.screen._plan.cmd
+            assert wr.started == []  # nothing fired — only the modal opened
+
+    @pytest.mark.asyncio
+    async def test_evidence_submit_dispatches_through_gate(self, tmp_path):
+        """Confirming the submit reaches ONLY the mocked write runner (network
+        is never touched live — conftest blocks the real spawn)."""
+        wr = FakeWriteRunner()
+        app, _, _ = make_app(repo_root=tmp_path, write_runner=wr)
+        seed_repo(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            plan = app._data.submit_bench("vllm-dual-test")
+            app.dispatch_action(plan)
+            await _settle(pilot)
+            assert len(wr.started) == 1
+            assert "--auto-submit" in wr.started[0]["cmd"]
+
+
+# ===========================================================================
+# Validate · Run (launch a validation step — confirm-gated, MOCKED stream)
+# ===========================================================================
+
+
+class TestValidateRunWired:
+    @pytest.mark.asyncio
+    async def test_run_enter_opens_confirm_modal(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            await _settle(pilot)
+            app.query_one("#run-ladder-table", DataTable).move_cursor(row=0)  # verify-full
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, ConfirmActionScreen)
+            assert "verify-full" in app.screen._plan.description
+            assert app.screen._plan.requires_confirm is True
+            assert app.screen._plan.requires_reconcile is False
+
+    @pytest.mark.asyncio
+    async def test_run_confirm_launches_via_mocked_write_runner(self):
+        """Confirming a Run step streams via run_validation → the MOCKED write
+        runner.  NO live process is spawned (conftest blocks it)."""
+        wr = FakeWriteRunner()
+        app, _, _ = make_app(write_runner=wr)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            await _settle(pilot)
+            app.query_one("#run-ladder-table", DataTable).move_cursor(row=2)  # bench
+            await pilot.press("enter")
+            await _settle(pilot)
+            screen = app.screen
+            assert isinstance(screen, ConfirmActionScreen)
+            screen.query_one("#confirm-ok-btn", Button).press()
+            await _settle(pilot)
+            assert len(wr.started) == 1
+            assert wr.started[0]["cmd"] == ["bash", "scripts/bench.sh"]
+            assert wr.started[0]["run_type"] == "validation"
+
+    @pytest.mark.asyncio
+    async def test_run_step_does_not_go_through_dispatch_action(self):
+        """A validation launch uses the on_confirm seam (run_validation), NOT the
+        gated execute_action — it never claims a GPU."""
+        wr = FakeWriteRunner()
+
+        async def detect_should_not_be_called():
+            raise AssertionError("a validation run must not reconcile")
+
+        app, _, _ = make_app(write_runner=wr)
+        # Swap the detect to one that screams if the reconcile gate runs on confirm.
+        app._data._detect_endpoint = detect_should_not_be_called
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            await _settle(pilot)
+            # The confirm modal DOES run reconcile-on-mount for display; but the
+            # commit must not re-enter execute_action.  Drive the kind directly.
+            app.run_validation_launch("verify-full")
+            await _settle(pilot)
+            assert len(wr.started) == 1
+            assert wr.started[0]["cmd"] == ["bash", "scripts/verify-full.sh"]
+
+
+# ===========================================================================
+# Estate write-extras (power-cap / prune / container top + rm) — all gated
+# ===========================================================================
+
+
+class TestEstateExtrasWired:
+    @pytest.mark.asyncio
+    async def test_power_cap_strip_populates(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("3")
+            await _settle(pilot)
+            strip = str(app.query_one("#powercap-strip", Static).render())
+            assert "GPU0" in strip and "230W" in strip
+            assert "capped" in strip  # GPU0 limit 230 < default 370
+
+    @pytest.mark.asyncio
+    async def test_power_cap_toggle_opens_confirm_off(self):
+        """GPU0 is capped → [c] stages a 'power-cap off' (uncap) confirm."""
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("3")
+            await _settle(pilot)
+            await pilot.press("c")
+            await _settle(pilot)
+            assert isinstance(app.screen, ConfirmActionScreen)
+            assert app.screen._plan.cmd == ["bash", "scripts/gpu-mode.sh", "power-cap", "off"]
+            assert app.screen._plan.requires_confirm is True
+            assert app.screen._plan.requires_reconcile is False
+
+    @pytest.mark.asyncio
+    async def test_power_cap_sweep_opens_confirm(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("3")
+            await _settle(pilot)
+            await pilot.press("w")
+            await pilot.pause()
+            assert isinstance(app.screen, ConfirmActionScreen)
+            assert "power-cap-sweep" in " ".join(app.screen._plan.cmd)
+
+    @pytest.mark.asyncio
+    async def test_prune_opens_confirm_modal(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("3")
+            await _settle(pilot)
+            await pilot.press("p")
+            await pilot.pause()
+            assert isinstance(app.screen, ConfirmActionScreen)
+            assert app.screen._plan.cmd == ["bash", "scripts/gpu-mode.sh", "prune"]
+
+    @pytest.mark.asyncio
+    async def test_prune_dispatches_through_gate(self):
+        wr = FakeWriteRunner()
+        app, _, _ = make_app(write_runner=wr)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            app.dispatch_action(app._data.prune())
+            await _settle(pilot)
+            assert len(wr.started) == 1
+            assert wr.started[0]["cmd"] == ["bash", "scripts/gpu-mode.sh", "prune"]
+
+    @pytest.mark.asyncio
+    async def test_container_top_reads_into_drill(self):
+        responses = fake_responses(**{"docker ps": ok(DOCKER_PS_ENGINE)})
+        app, _, _ = make_app(responses=responses)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("3")
+            await _settle(pilot)
+            app.query_one("#estate-tabs", TabbedContent).active = "tab-containers"
+            await pilot.pause()
+            app.query_one("#containers-table", DataTable).move_cursor(row=0)
+            await pilot.press("t")  # top (READ)
+            await _settle(pilot)
+            # No modal — top is a read.
+            assert not isinstance(app.screen, ConfirmActionScreen)
+            body = str(app.query_one("#drill-stats", Static).render())
+            assert "PID" in body or "vllm" in body
+            # [t] also fills the Config tab from the matched registry row.
+            cfg = str(app.query_one("#drill-config", Static).render())
+            assert "vllm-qwen36-27b-dual" in cfg
+
+    @pytest.mark.asyncio
+    async def test_container_rm_opens_reconcile_gated_confirm(self):
+        responses = fake_responses(**{"docker ps": ok(DOCKER_PS_ENGINE)})
+        app, _, _ = make_app(responses=responses)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("3")
+            await _settle(pilot)
+            app.query_one("#estate-tabs", TabbedContent).active = "tab-containers"
+            await pilot.pause()
+            app.query_one("#containers-table", DataTable).move_cursor(row=0)
+            await pilot.press("X")  # rm
+            await pilot.pause()
+            assert isinstance(app.screen, ConfirmActionScreen)
+            assert app.screen._plan.cmd == ["docker", "rm", "vllm-qwen36-27b-dual"]
+            assert app.screen._plan.requires_reconcile is True  # frees a GPU → gated
+
+    @pytest.mark.asyncio
+    async def test_container_rm_refused_when_unsafe(self):
+        """rm of a live container → reconcile unsafe → refused (no write)."""
+        wr = FakeWriteRunner()
+        responses = fake_responses(**{"docker ps": ok(DOCKER_PS_ENGINE)})
+        gpus = [GpuInfo(index=0, mem_used_mib=22000), GpuInfo(index=1, mem_used_mib=1)]
+        app, _, _ = make_app(
+            responses=responses, gpus=gpus, target=ServingTarget(gpus=gpus), write_runner=wr
+        )
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            app.dispatch_action(app._data.container_rm("vllm-qwen36-27b-dual"))
+            await _settle(pilot)
+            assert wr.started == []  # refused at the gate
+
+
+# ===========================================================================
+# Belt-and-suspenders: no live write / network across the Validate surface
+# ===========================================================================
+
+
+class TestValidateNoLiveWriteOrNetwork:
+    @pytest.mark.asyncio
+    async def test_full_validate_browse_touches_only_fakes(self, tmp_path):
+        wr = FakeWriteRunner()
+        app, runner, _ = make_app(repo_root=tmp_path, write_runner=wr)
+        seed_repo(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            # Browse every Validate tab + Estate extras — pure reads, no writes.
+            await pilot.press("4")
+            await _settle(pilot)
+            for tab in ("tab-doctor", "tab-benchmarks", "tab-evidence", "tab-run"):
+                app.query_one("#validate-tabs", TabbedContent).active = tab
+                await pilot.pause()
+            await pilot.press("3")
+            await _settle(pilot)
+            # Nothing was written; submit-bench / prune / power-cap never auto-fired.
+            assert wr.started == []
+            assert all("--auto-submit" not in " ".join(c) for c in runner.calls)
+            assert all("power-cap on" not in " ".join(c) and "power-cap off" not in " ".join(c)
+                       for c in runner.calls)

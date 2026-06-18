@@ -314,13 +314,218 @@ class ActionPlan:
     The reconcile gate is consulted BEFORE execution.
     """
 
-    kind: str                           # "serve" | "set_default" | "clear_default" | "scene" | "estate_down" | "container"
+    kind: str                           # "serve" | "set_default" | "clear_default" | "scene" | "estate_down" | "container" | "validation" | "submit_bench" | "power_cap" | "power_cap_sweep" | "prune" | "container_rm"
     cmd: list[str]
     description: str = ""
     is_write: bool = True
     requires_reconcile: bool = True
     force: bool = False
     force_reason: str = ""              # required when force=True
+    # Phase 4: destructive non-GPU writes (prune, power-cap, submit-bench POST)
+    # don't contend for a GPU so requires_reconcile=False, but they MUST still go
+    # through a confirm modal.  This flag tells the UI "confirm even though the
+    # reconcile gate doesn't apply".  ``network`` flags an outward-facing write
+    # (submit-bench POST/PR) so the confirm copy can warn it leaves the rig.
+    requires_confirm: bool = True
+    network: bool = False
+
+
+# ── Phase 4: Doctor (estate + profile triage reads) ──────────────────────────────
+
+
+@dataclass
+class EstateDiagnose:
+    """Parsed ``diagnose-estate.sh --json`` (estate_cli.py diagnose --json).
+
+    REAL shape (verified live): a top-level object with ``valid``, ``summary``
+    (GREEN/AMBER/RED), ``estate_file``, ``live`` (bool), and a ``checks`` block
+    holding ``schema`` / ``registry`` / ``per_instance_fits`` / ``cross_checks``
+    / ``calibration`` / ``live``.  We keep the raw dict and surface the
+    load-bearing top-level signals + a per-instance fit summary for the card.
+    """
+
+    valid: bool = False
+    summary: str = ""                   # GREEN | AMBER | RED | ""
+    estate_file: str = ""
+    live: bool = False
+    instance_count: int = 0
+    instances_valid: int = 0            # how many per_instance_fits are valid
+    cross_checks_ok: bool = False
+    raw: dict[str, Any] = field(default_factory=dict)
+    error: str = ""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any] | None) -> "EstateDiagnose":
+        if not d:
+            return cls(error="no output")
+        checks = d.get("checks") or {}
+        schema = checks.get("schema") or {}
+        fits = checks.get("per_instance_fits") or []
+        cross = checks.get("cross_checks") or {}
+        return cls(
+            valid=bool(d.get("valid", False)),
+            summary=str(d.get("summary", "")),
+            estate_file=str(d.get("estate_file", "")),
+            live=bool(d.get("live", False)),
+            instance_count=_as_int(schema.get("instance_count")) or len(fits),
+            instances_valid=sum(1 for f in fits if isinstance(f, dict) and f.get("valid")),
+            cross_checks_ok=bool(cross.get("ok", False)),
+            raw=d,
+        )
+
+    @property
+    def summary_glyph(self) -> str:
+        return {"GREEN": "●", "AMBER": "◐", "YELLOW": "◐", "RED": "○"}.get(self.summary.upper(), "·")
+
+
+@dataclass
+class ProfileTriageStep:
+    """One ``[N/6]`` step from diagnose-profile.sh's text output."""
+
+    num: int
+    total: int
+    name: str
+    status: str = "passed"              # passed | failed | warn
+    detail: str = ""
+
+
+@dataclass
+class ProfileTriage:
+    """Parsed ``diagnose-profile.sh <slug>`` text output.
+
+    diagnose-profile has NO --json mode (verified live) — it is a 6-step text
+    triage with ``[N/6] <name>`` headers, ``✓/✗/⚠`` check glyphs, and a final
+    ``Triage summary: GREEN|AMBER|RED`` line.  This is a deliberately coarse
+    text parse; ``raw`` keeps the full output for verbatim rendering.
+    """
+
+    slug: str = ""
+    summary: str = ""                   # GREEN | AMBER | RED | ""
+    steps: list[ProfileTriageStep] = field(default_factory=list)
+    raw: str = ""
+    error: str = ""
+
+    @property
+    def summary_glyph(self) -> str:
+        return {"GREEN": "●", "AMBER": "◐", "YELLOW": "◐", "RED": "○"}.get(self.summary.upper(), "·")
+
+    @property
+    def passed(self) -> int:
+        return sum(1 for s in self.steps if s.status == "passed")
+
+
+@dataclass
+class DoctorReport:
+    """The full Doctor read: health.sh DoctorRead + estate diagnose + profile
+    triage.  Each leg is best-effort; a failed leg carries its own error and
+    does not fail the others."""
+
+    health: DoctorRead = field(default_factory=DoctorRead)
+    estate: EstateDiagnose = field(default_factory=EstateDiagnose)
+    profile: Optional[ProfileTriage] = None   # None when no target slug to triage
+
+
+# ── Phase 4: Benchmarks explorer ──────────────────────────────────────────────────
+
+
+@dataclass
+class BenchRow:
+    """One filterable benchmarks row for the explorer.
+
+    Sourced from either the structured #249 measurement-record corpus
+    (``source='corpus'`` — authoritative TPS/ctx, no 8-pack) or a coarse
+    BENCHMARKS.md scrape (``source='benchmarks.md'`` — carries the 8-pack).
+    The pane filters on (model, engine, topology)."""
+
+    model: str = ""
+    engine: str = ""
+    topology: str = ""
+    narr_tps: Optional[float] = None
+    code_tps: Optional[float] = None
+    max_ctx: str = ""
+    quality_8pk: str = ""               # e.g. "109/150" or ""
+    date: str = ""
+    source: str = ""                    # "corpus" | "benchmarks.md"
+    tag: str = ""                       # corpus _tag / md compose token
+
+    @property
+    def tps_label(self) -> str:
+        if self.narr_tps is None and self.code_tps is None:
+            return "—"
+        n = f"{self.narr_tps:.0f}" if self.narr_tps is not None else "—"
+        c = f"{self.code_tps:.0f}" if self.code_tps is not None else "—"
+        return f"{n}/{c}"
+
+    @property
+    def quality_label(self) -> str:
+        return self.quality_8pk or "—"
+
+
+# ── Phase 4: Evidence (rebench run tags) ──────────────────────────────────────────
+
+
+@dataclass
+class EvidenceTag:
+    """One ``results/rebench/<tag>/`` run directory the Evidence pane lists."""
+
+    tag: str
+    path: str = ""
+    has_report: bool = False            # REPORT.md present
+    has_internal: bool = False          # _internal.json present (#249-shaped)
+    has_soak: bool = False              # soak.log / soak-artifacts present
+    date: str = ""                      # from REPORT.md Meta or dir mtime
+    # A coarse one-line TL;DR scraped from REPORT.md if present.
+    tldr: str = ""
+
+
+@dataclass
+class EvidenceReport:
+    """A generated paste-ready report for one evidence tag."""
+
+    tag: str
+    report_path: str = ""               # REPORT.md path (generated/located)
+    body: str = ""                      # the markdown body
+    error: str = ""
+
+
+# ── Phase 4: Power cap ────────────────────────────────────────────────────────────
+
+
+@dataclass
+class PowerCapGpu:
+    """One GPU's power-limit row from ``gpu-mode power-cap status``."""
+
+    index: int
+    limit_w: Optional[float] = None
+    default_w: Optional[float] = None
+    min_w: Optional[float] = None
+    max_w: Optional[float] = None
+
+
+@dataclass
+class PowerCapState:
+    """Parsed ``gpu-mode power-cap status`` (READ — safe to call live).
+
+    REAL shape (verified live): a banner line then a CSV-ish table
+    ``index, power.limit [W], power.default_limit [W], power.min_limit [W],
+    power.max_limit [W]`` with one row per GPU (values like ``370.00 W``)."""
+
+    gpus: list[PowerCapGpu] = field(default_factory=list)
+    raw: str = ""
+    error: str = ""
+
+
+# ── Phase 4: Container top (docker top — READ) ────────────────────────────────────
+
+
+@dataclass
+class ContainerTop:
+    """Parsed ``docker top <name>`` (READ — never mutates the container)."""
+
+    name: str
+    header: list[str] = field(default_factory=list)
+    rows: list[list[str]] = field(default_factory=list)
+    error: str = ""
 
 
 # ── Parse helpers (pure) ─────────────────────────────────────────────────────────
@@ -562,3 +767,340 @@ def measurement_from_explain_benchmarks(benchmarks: list[dict[str, Any]]) -> Mea
         if m.narr_tps is not None:
             best = m  # keep walking → newest TPS-bearing row wins
     return best
+
+
+# ── Phase 4 parsers (pure) ────────────────────────────────────────────────────────
+
+# diagnose-profile.sh step header:  [1/6] Compose registry entry exists
+_PROFILE_STEP_RE = re.compile(r"^\[(\d+)/(\d+)\]\s+(.+?)\s*$")
+# check glyph line:  ✓ vllm/dual found ...   /   ✗ ...   /   ⊘ / ⚠ / △ note
+# (verified live: diagnose-profile uses ✓ pass, ✗ fail, ⊘ skipped/projection-FAIL).
+_PROFILE_CHECK_RE = re.compile(r"^\s+([✓✗⊘⚠△])\s+(.+)")
+# final verdict:  Triage summary: GREEN | YELLOW | RED  (verified live enum).
+_PROFILE_SUMMARY_RE = re.compile(
+    r"Triage summary:\s*(GREEN|YELLOW|AMBER|RED)", re.IGNORECASE
+)
+
+
+def parse_profile_triage(text: str, slug: str = "") -> ProfileTriage:
+    """Parse diagnose-profile.sh's 6-step text output into a ProfileTriage.
+
+    diagnose-profile has no --json (verified live): scan the ``[N/6] <name>``
+    step headers, attribute the first ``✓/✗/⚠`` check glyph after each to that
+    step's status, and capture the ``Triage summary: <COLOR>`` verdict.  Any
+    line it can't recognize is ignored; ``raw`` preserves the full text.
+    """
+    clean = strip_ansi(text or "")
+    tri = ProfileTriage(slug=slug, raw=text or "")
+    cur: Optional[ProfileTriageStep] = None
+    for line in clean.splitlines():
+        m = _PROFILE_STEP_RE.match(line)
+        if m:
+            cur = ProfileTriageStep(
+                num=int(m.group(1)), total=int(m.group(2)), name=m.group(3).strip()
+            )
+            tri.steps.append(cur)
+            continue
+        m = _PROFILE_CHECK_RE.match(line)
+        if m and cur is not None:
+            glyph, detail = m.group(1), m.group(2).strip()
+            # First glyph on a step sets its status; a later ✗/⊘ downgrades it.
+            status = {
+                "✓": "passed", "✗": "failed",
+                "⊘": "warn", "⚠": "warn", "△": "warn",
+            }[glyph]
+            if not cur.detail:
+                cur.detail = detail
+            # Worst-glyph wins per step (failed > warn > passed) — don't upgrade.
+            order = {"passed": 0, "warn": 1, "failed": 2}
+            if order[status] >= order.get(cur.status, 0):
+                cur.status = status
+            continue
+        m = _PROFILE_SUMMARY_RE.search(line)
+        if m:
+            tri.summary = m.group(1).upper()
+    return tri
+
+
+# gpu-mode power-cap status row:
+#   0, 370.00 W, 370.00 W, 100.00 W, 390.00 W
+_POWER_CAP_ROW_RE = re.compile(
+    r"^\s*(\d+)\s*,\s*([0-9.]+)\s*W\s*,\s*([0-9.]+)\s*W\s*,"
+    r"\s*([0-9.]+)\s*W\s*,\s*([0-9.]+)\s*W\s*$"
+)
+
+
+def parse_power_cap_status(text: str) -> PowerCapState:
+    """Parse ``gpu-mode power-cap status`` output (verified live shape).
+
+    A banner line then a CSV-ish table with a header line and one
+    ``index, limit W, default W, min W, max W`` row per GPU.  The header line
+    (non-numeric first cell) is ignored by the numeric row regex."""
+    clean = strip_ansi(text or "")
+    st = PowerCapState(raw=text or "")
+    for line in clean.splitlines():
+        m = _POWER_CAP_ROW_RE.match(line)
+        if not m:
+            continue
+        st.gpus.append(
+            PowerCapGpu(
+                index=int(m.group(1)),
+                limit_w=_as_float(m.group(2)),
+                default_w=_as_float(m.group(3)),
+                min_w=_as_float(m.group(4)),
+                max_w=_as_float(m.group(5)),
+            )
+        )
+    if not st.gpus:
+        st.error = "no power-limit rows parsed"
+    return st
+
+
+def parse_docker_top(name: str, text: str) -> ContainerTop:
+    """Parse ``docker top <name>`` output (READ).
+
+    docker top prints a ``ps``-style table: first line is the header, the rest
+    are process rows (whitespace-split).  Best-effort split — keeps the raw
+    columns so the pane can render them verbatim."""
+    top = ContainerTop(name=name)
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        top.error = "no docker top output"
+        return top
+    top.header = lines[0].split()
+    for ln in lines[1:]:
+        # Limit the split to len(header) so the trailing CMD (which can contain
+        # spaces) stays as one cell.
+        ncols = max(len(top.header), 1)
+        top.rows.append(ln.split(None, ncols - 1))
+    return top
+
+
+# ── #249 measurement-record corpus → BenchRow ────────────────────────────────────
+
+
+def bench_row_from_corpus_record(rec: dict[str, Any]) -> Optional[BenchRow]:
+    """Build a BenchRow from one #249 measurement-record JSONL line.
+
+    REAL shape (verified live via measurement_record.py): a frozen-schema object
+    with ``model_slug`` / ``engine_id`` / ``topology`` / ``kv_dtype`` /
+    ``max_model_len`` and a ``measured_extensions`` block holding
+    ``decode_tps_by_ctx`` (a ctx→TPS ladder; ``"canonical-short"`` is the bench
+    point) and ``wall_tps``.  A bench-only record carries NO 8-pack (that lives
+    in BENCHMARKS.md / the rebench _internal.json), so ``quality_8pk`` is "".
+
+    ``decode_tps_by_ctx['canonical-short']`` is the model decode rate measured
+    on the canonical short prompts; we surface it as ``code_tps`` (the bench's
+    decode number maps to the per-token decode rate, matching how the rebench
+    REPORT.md reports it) and leave ``narr_tps`` from ``wall_tps`` if present so
+    the row shows a representative pair.  Returns None for a record with no
+    usable TPS (an honest empty corpus row would mislead the explorer)."""
+    if not isinstance(rec, dict):
+        return None
+    ext = rec.get("measured_extensions") or {}
+    ladder = ext.get("decode_tps_by_ctx") or {}
+    decode = None
+    if isinstance(ladder, dict):
+        # Prefer the canonical-short point; else the first numeric value.
+        decode = _as_float(ladder.get("canonical-short"))
+        if decode is None:
+            for v in ladder.values():
+                decode = _as_float(v)
+                if decode is not None:
+                    break
+    wall = _as_float(ext.get("wall_tps"))
+    if decode is None and wall is None:
+        return None
+    prov = rec.get("provenance") or {}
+    return BenchRow(
+        model=str(rec.get("model_slug", "")),
+        engine=str(rec.get("engine_id", "")),
+        topology=str(rec.get("topology", "")),
+        narr_tps=wall,
+        code_tps=decode,
+        max_ctx=_ctx_label(rec.get("max_model_len")),
+        quality_8pk="",                 # bench-only record carries no 8-pack
+        date=str(prov.get("last_confirmed") or ""),
+        source="corpus",
+        tag=str(rec.get("_tag", "")),
+    )
+
+
+def _ctx_label(max_model_len: Any) -> str:
+    """Render a max_model_len int as a compact ctx label (262144 → '256K')."""
+    n = _as_int(max_model_len)
+    if n is None:
+        return ""
+    if n >= 1024:
+        k = n / 1024.0
+        return f"{k:.0f}K" if k == int(k) else f"{k:.1f}K"
+    return str(n)
+
+
+# Section header → (model, topology) for the BENCHMARKS.md fallback parse.
+# REAL section headers (verified live): "## Qwen3.6-27B", "### Dual-card (2× RTX
+# 3090, TP=2)", "### Single-card (1× RTX 3090) — vLLM", "## Gemma 4 31B ...".
+_BENCH_MODEL_HDR_RE = re.compile(r"^#{2,3}\s+(.+?)\s*(?:\(community-experimental\)|—.*)?$")
+_BENCH_TOPO_HDR_RE = re.compile(
+    r"(single-card|dual-card|quad-card|multi)", re.IGNORECASE
+)
+
+
+def _bench_md_topology(header: str) -> str:
+    """Map a BENCHMARKS.md sub-section header to a topology slug."""
+    low = header.lower()
+    if "single" in low:
+        return "single"
+    if "dual" in low:
+        return "dual"
+    if "quad" in low:
+        return "multi4"
+    m = re.search(r"tp\s*=\s*(\d+)", low)
+    if m:
+        tp = int(m.group(1))
+        return {1: "single", 2: "dual"}.get(tp, f"multi{tp}")
+    return ""
+
+
+def _normalize_model_slug(header: str) -> str:
+    """Normalize a BENCHMARKS.md model section header into a registry-like slug.
+
+    'Qwen3.6-27B' → 'qwen3.6-27b'; 'Gemma 4 31B' → 'gemma-4-31b'; strips a
+    trailing parenthetical and an em-dash clause.  Best-effort: the explorer
+    filters on this loosely (substring), so exactness isn't load-bearing."""
+    h = header.strip()
+    h = re.split(r"\s+[—-]\s+|\s*\(", h, 1)[0].strip()
+    return re.sub(r"\s+", "-", h).lower()
+
+
+def bench_rows_from_benchmarks_md(md_text: str) -> list[BenchRow]:
+    """Parse BENCHMARKS.md into a list of BenchRow (the explorer's fallback).
+
+    Walks the doc tracking the current model (``## <Model>``) and topology
+    (``### <Single|Dual|Quad>-card …``) section headers, and parses each
+    canonical 9-column table row (``Compose | Rig | KV | Max ctx | Narr / Code
+    TPS | PP | VRAM | Date | Notes``) into a BenchRow.  Reuses the same
+    cell-parsing primitives as the per-slug scrape, so it inherits the bold /
+    tilde / decode-paren / TBD handling.  Rows whose TPS cell carries no pair
+    (TBD / —) are skipped (no bogus pair).  ``source='benchmarks.md'``; the
+    8-pack is scraped from the row's Notes cell when present."""
+    rows: list[BenchRow] = []
+    if not md_text:
+        return rows
+    cur_model = ""
+    cur_topo = ""
+    for line in md_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## ") and not stripped.startswith("### "):
+            m = _BENCH_MODEL_HDR_RE.match(stripped)
+            if m:
+                title = m.group(1).strip()
+                # Skip non-model sections ("How to add a row", "See also", etc.)
+                if _looks_like_model_header(title):
+                    cur_model = _normalize_model_slug(title)
+                    cur_topo = ""
+            continue
+        if stripped.startswith("### "):
+            cur_topo = _bench_md_topology(stripped)
+            continue
+        if not stripped.startswith("|") or not cur_model:
+            continue
+        cells = _bench_row_cells(line)
+        if len(cells) < 5:
+            continue
+        # Skip the header + separator rows.
+        first = cells[0].strip().strip("`").lower()
+        if first in ("compose", "") or set(cells[0].strip()) <= {"-", ":", " "}:
+            continue
+        # Find the first parseable 'N / M' pair (the Narr / Code TPS column).
+        narr = code = None
+        for cell in cells[1:]:
+            n, c = _tps_from_cell(cell)
+            if n is not None:
+                narr, code = n, c
+                break
+        if narr is None:
+            continue
+        row = BenchRow(
+            model=cur_model,
+            engine=_engine_from_compose_cell(cells[0]),
+            topology=cur_topo,
+            narr_tps=narr,
+            code_tps=code,
+            max_ctx=_first_ctx_cell(cells),
+            source="benchmarks.md",
+            tag=_compose_token(cells[0]),
+        )
+        q = _BENCH_8PK_RE.search(line)
+        if q:
+            row.quality_8pk = q.group(1)
+        d = _BENCH_DATE_RE.search(line)
+        if d:
+            row.date = d.group(1)
+        rows.append(row)
+    return rows
+
+
+# Model section headers we recognize (avoids treating "How to add a row" etc.
+# as a model).  A header "looks like a model" if it has a digit (size/version)
+# or matches a known family token.
+_MODEL_HDR_TOKENS = ("qwen", "gemma", "llama", "mistral", "deckard", "diffusion")
+
+
+def _looks_like_model_header(title: str) -> bool:
+    low = title.lower()
+    if any(tok in low for tok in _MODEL_HDR_TOKENS):
+        return True
+    return False
+
+
+def _compose_token(cell: str) -> str:
+    """Extract the leading compose/file token from a BENCHMARKS.md first cell.
+
+    First cells look like ``` `minimal.yml` (`mem-util 0.95 …`) ``` or
+    ``` `ik-llama/iq4ks-mtp` ⭐ ``` — the load-bearing token is the FIRST
+    backtick-quoted span (or the first whitespace token if unquoted).  Trailing
+    parentheticals / decorations are dropped."""
+    s = cell.strip()
+    m = re.match(r"`([^`]+)`", s)
+    if m:
+        return m.group(1).strip()
+    return s.split()[0].strip("`") if s else ""
+
+
+def _engine_from_compose_cell(cell: str) -> str:
+    """Best-effort engine slug from a BENCHMARKS.md first cell.
+
+    First cells look like ``llamacpp/mtp`` / ``ik-llama/iq4ks-mtp`` /
+    ``beellama/dflash`` / ``minimal.yml`` / ``vllm/dual``.  When the cell is an
+    ``engine/variant`` slug, take the engine prefix; a bare ``*.yml`` filename
+    has no engine token → "" (the topology section + model still filter)."""
+    tok = _compose_token(cell)
+    if "/" in tok:
+        eng = tok.split("/")[0]
+        # 'llamacpp' → 'llama-cpp' is the registry's launch engine; keep the
+        # markdown token as-is (the pane filters loosely).
+        return eng
+    return ""
+
+
+def _first_ctx_cell(cells: list[str]) -> str:
+    """Pull the 'Max ctx' cell (canonical index 3) from a parsed bench row.
+
+    Falls back to scanning for the first cell that looks like a ctx label
+    (``262K`` / ``131072`` / ``~188K``) when the layout drifts."""
+    if len(cells) > 3:
+        c = cells[3]
+        if re.search(r"\d", c):
+            return _clean_ctx_cell(c)
+    for c in cells[1:]:
+        if re.search(r"\b~?\d+\s*[Kk]?\b", c) and "/" not in c and "W" not in c:
+            if re.search(r"[Kk]\b|\d{4,}", c):
+                return _clean_ctx_cell(c)
+    return ""
+
+
+def _clean_ctx_cell(c: str) -> str:
+    """Strip markdown bold/notes from a ctx cell, keeping the first ctx token."""
+    m = re.search(r"~?\*{0,2}\s*(\d[\d.,]*\s*[Kk]?)", c)
+    return m.group(1).strip() if m else c.strip()[:12]

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import subprocess
 import time
 import uuid
@@ -45,19 +46,32 @@ from club3090_tui_core.runner import SubprocessRunner
 
 from .data import (
     ActionPlan,
+    BenchRow,
     ByoResult,
     CatalogEntry,
     ContainerInfo,
+    ContainerTop,
     DoctorRead,
+    DoctorReport,
+    EstateDiagnose,
     EstateState,
+    EvidenceReport,
+    EvidenceTag,
     FitVerdict,
     GpuConflict,
     Measurement,
+    PowerCapState,
+    ProfileTriage,
     ReconcileResult,
     Scene,
+    bench_row_from_corpus_record,
+    bench_rows_from_benchmarks_md,
     measurement_from_explain_benchmarks,
     parse_benchmarks_md_for_slug,
+    parse_docker_top,
     parse_health_text,
+    parse_power_cap_status,
+    parse_profile_triage,
 )
 
 # ── Local card name (this rig) ──────────────────────────────────────────────────
@@ -854,6 +868,546 @@ class CockpitData:
             pass
         finally:
             self._pending_claims.pop(token, None)
+
+    # ════════════════════════════════════════════════════════════════════════════
+    # PHASE 4 — Validate surface (Run · Doctor · Benchmarks · Evidence + ops)
+    # ════════════════════════════════════════════════════════════════════════════
+
+    # ── Validate / Run: launch a validation script (WIRED, execution MOCKED) ──────
+
+    # The validation scripts the Run pane can launch.  Each maps to its core
+    # parser (where one exists) so the streamed output becomes structured
+    # progress.  ALL of these LAUNCH a heavy process that stresses / hits a live
+    # serving model — they are WIRED but execution is MOCKED in tests and NEVER
+    # run live this phase (conftest blocks the real spawn).
+    #   kind → (script-relative-cmd, parser_test_type|None)
+    #
+    # Verified live (2026-06-18): the script filenames + arg conventions below
+    # are the REAL on-disk ones.  Most scripts read the target endpoint/model
+    # from the environment (``MODEL=``/``URL=``); two do NOT and take CLI args
+    # instead — those are handled specially in ``validation_plan``:
+    #   - ``stream-toolcall-probe`` is a ``.py`` (not ``.sh``) and takes
+    #     ``--url``/``--model`` flags, not env (see its ``Usage:`` header).
+    #   - ``quality-baseline.sh`` exists as its own wrapper (#252) and REQUIRES
+    #     ``--slug``; endpoint/model are inherited from env via quality-test.sh.
+    _VALIDATION_KINDS: dict[str, tuple[list[str], Optional[str]]] = {
+        "verify-full": (["bash", "scripts/verify-full.sh"], "verify-full"),
+        "verify-stress": (["bash", "scripts/verify-stress.sh"], "verify-stress"),
+        "bench": (["bash", "scripts/bench.sh"], "bench"),
+        "quality-test": (["bash", "scripts/quality-test.sh", "--quick"], "quality"),
+        "soak-test": (["bash", "scripts/soak-test.sh"], "soak"),
+        "rebench-full": (["bash", "scripts/rebench-full.sh"], "rebench-full"),
+        # Extra tools (no dedicated core parser → stream raw via NullParser):
+        "quality-baseline": (["bash", "scripts/quality-baseline.sh"], None),
+        "bench-agentic": (["bash", "scripts/bench-agentic.sh"], None),
+        "stream-toolcall-probe": (["python3", "scripts/stream-toolcall-probe.py"], None),
+    }
+
+    def validation_plan(
+        self,
+        kind: str,
+        *,
+        model: Optional[str] = None,
+        url: Optional[str] = None,
+        slug: Optional[str] = None,
+    ) -> ActionPlan:
+        """Build the ActionPlan for a validation-script launch (WIRED, gated).
+
+        Validation scripts hit / stress a live serving model but do NOT
+        claim/free a GPU, so ``requires_reconcile=False`` — yet they are heavy
+        and must still go through a confirm modal (``requires_confirm=True``).
+
+        Most scripts read ``MODEL`` / ``URL`` of the current target from the
+        environment; the actual env is injected by ``run_validation`` at
+        execution time, NOT baked into the cmd here, so the plan stays
+        inspectable/loggable without leaking the target.  Two are exceptions
+        (verified live):
+          - ``stream-toolcall-probe.py`` takes ``--url`` / ``--model`` CLI
+            args (not env), so they are appended to the cmd when supplied;
+          - ``quality-baseline.sh`` REQUIRES ``--slug`` (the registry slug),
+            which is appended when supplied."""
+        if kind not in self._VALIDATION_KINDS:
+            raise ValueError(
+                f"unknown validation kind {kind!r}; "
+                f"expected one of {sorted(self._VALIDATION_KINDS)}"
+            )
+        cmd, _parser = self._VALIDATION_KINDS[kind]
+        cmd = list(cmd)
+        # stream-toolcall-probe.py reads --url/--model from the CLI, not env.
+        if kind == "stream-toolcall-probe":
+            if url:
+                cmd += ["--url", url]
+            if model:
+                cmd += ["--model", model]
+        # quality-baseline.sh requires --slug (endpoint/model still env-inherited).
+        elif kind == "quality-baseline" and slug:
+            cmd += ["--slug", slug]
+        target_bits: list[str] = []
+        if slug and kind == "quality-baseline":
+            target_bits.append(f"slug={slug}")
+        if model:
+            target_bits.append(f"MODEL={model}")
+        if url:
+            target_bits.append(f"URL={url}")
+        target = (" → " + " ".join(target_bits)) if target_bits else ""
+        return ActionPlan(
+            kind="validation",
+            cmd=cmd,
+            description=f"{kind}{target}".strip(),
+            requires_reconcile=False,   # hits the model; does not claim a GPU
+            requires_confirm=True,      # heavy — confirm before launching
+        )
+
+    def _validation_parser(self, kind: str) -> Any:
+        """The core parser for a validation kind, or a NullParser when none
+        exists (extra tools).  Imported lazily so the data layer stays
+        Textual/parser-import-free until a launch is actually requested."""
+        _cmd, test_type = self._VALIDATION_KINDS.get(kind, ([], None))
+        if not test_type:
+            return _NullParser()
+        from club3090_tui_core.parsers import TestType, get_parser
+
+        return get_parser(TestType(test_type))
+
+    async def run_validation(
+        self,
+        kind: str,
+        *,
+        model: Optional[str] = None,
+        url: Optional[str] = None,
+        slug: Optional[str] = None,
+        on_event: Optional[Callable[[Any], None]] = None,
+        on_line: Optional[Callable[[str], None]] = None,
+    ) -> Any:
+        """Launch a validation script via the core SubprocessRunner, streamed.
+
+        ⚠️  WIRED-BUT-MOCK-ONLY.  These scripts stress / hit a serving model and
+        are heavy; tests mock the write runner (conftest blocks the real spawn).
+        NEVER run live this phase.
+
+        Parses the streamed output into structured progress/result via the core
+        parser for the kind (``verify-full`` / ``bench`` / ``verify-stress`` /
+        ``quality`` / ``soak`` / ``rebench-full``); extra tools stream raw.
+        ``MODEL`` / ``URL`` of the current target are injected into the child
+        env so the scripts hit the right endpoint.
+
+        Returns the core ``CoreRunState`` (the streaming handle).  Confirmation
+        is the CALLER's job (the Run pane wires a confirm modal before calling
+        this — these launches always ``requires_confirm``)."""
+        import os as _os
+
+        plan = self.validation_plan(kind, model=model, url=url, slug=slug)
+        env = dict(_os.environ)
+        if model:
+            env["MODEL"] = model
+        if url:
+            env["URL"] = url
+        parser = self._validation_parser(kind)
+        if on_event is not None or on_line is not None:
+            # Per-launch callbacks for the live pane.  set_callbacks is on the
+            # shared runner; the caller owns wiring/teardown.
+            self._write_runner.set_callbacks(on_event=on_event, on_line=on_line)
+        # No reconcile gate (validation does not claim a GPU); straight to the
+        # streamer.  In tests this is the FakeWriteRunner; live it is blocked.
+        return await self._write_runner.start_raw(
+            plan.cmd, env=env, run_type=plan.kind, parser=parser
+        )
+
+    # ── Validate / Doctor: health + estate-diagnose + profile-triage (READS) ──────
+
+    async def doctor(
+        self, *, url: Optional[str] = None, slug: Optional[str] = None
+    ) -> DoctorReport:
+        """Full Doctor read (ALL legs are READ-only, safe to call live):
+
+          - ``health.sh`` (text) → ``DoctorRead`` (reuses the existing parser);
+          - ``diagnose-estate.sh --json`` → ``EstateDiagnose``;
+          - ``diagnose-profile.sh <slug>`` (text-only — no --json) →
+            ``ProfileTriage`` (only when a target ``slug`` is supplied).
+
+        Each leg is best-effort: a failed leg carries its own error and does not
+        fail the others."""
+        report = DoctorReport()
+        report.health = await self.doctor_read(url=url)
+        report.estate = await self.estate_diagnose()
+        if slug:
+            report.profile = await self.profile_triage(slug)
+        return report
+
+    async def estate_diagnose(self) -> EstateDiagnose:
+        """diagnose-estate.sh --json → EstateDiagnose (READ)."""
+        data, err = await self._run_json(
+            ["bash", "scripts/diagnose-estate.sh", "--json"], timeout=40.0
+        )
+        if data is None:
+            return EstateDiagnose(error=err or "no output")
+        return EstateDiagnose.from_dict(data)
+
+    async def profile_triage(self, slug: str) -> ProfileTriage:
+        """diagnose-profile.sh <slug> (text-only — NO --json) → ProfileTriage.
+
+        Verified live: this script has no JSON mode, so we parse the 6-step text
+        triage.  A non-zero exit still parses (the triage prints steps before a
+        RED verdict)."""
+        res = await self._runner.run(
+            ["bash", "scripts/diagnose-profile.sh", slug],
+            cwd=str(self.repo_root),
+            timeout=60.0,
+        )
+        if res.timed_out:
+            return ProfileTriage(slug=slug, error=f"timed out triaging {slug}")
+        text = res.stdout or res.stderr
+        tri = parse_profile_triage(text, slug)
+        if not tri.steps and not tri.summary:
+            tri.error = (res.stderr.strip()[:200] or f"no triage output (rc={res.returncode})")
+        return tri
+
+    # ── Validate / Benchmarks: explorer (corpus → BENCHMARKS.md fallback) (READ) ──
+
+    async def benchmarks_explorer(
+        self, *, prefer_corpus: bool = True
+    ) -> tuple[list[BenchRow], Optional[str]]:
+        """Filterable benchmarks rows for the explorer (READ).
+
+        Preference order (verified live shapes):
+          1. the structured #249 measurement-record corpus
+             (``results/measurement-records/*.jsonl``) — authoritative
+             TPS / ctx per (model, engine, topology), but NO 8-pack;
+          2. a coarse BENCHMARKS.md scrape — carries the 8-pack and covers
+             configs that were never run through the #249 producer.
+
+        The corpus is per-rig + gitignored and may be EMPTY (it is on a fresh
+        rig — verified: no ``results/measurement-records/`` dir), so the markdown
+        fallback is the common path.  When corpus rows exist they take
+        precedence for their (model, engine, topology) key, and the markdown
+        fallback fills the 8-pack the corpus lacks + adds any configs the corpus
+        doesn't cover.  Returns ``(rows, error)``; ``error`` is set only when
+        BOTH sources are unavailable."""
+        corpus_rows: list[BenchRow] = []
+        if prefer_corpus:
+            corpus_rows = self._read_measurement_corpus()
+
+        md_rows = bench_rows_from_benchmarks_md(self._read_benchmarks_md())
+
+        if not corpus_rows and not md_rows:
+            return [], "no benchmark data (empty #249 corpus and no BENCHMARKS.md rows)"
+
+        # Index markdown rows by (model, engine, topology) so corpus rows can
+        # borrow the 8-pack the bench-only corpus record lacks.
+        md_by_key: dict[tuple[str, str, str], BenchRow] = {}
+        for r in md_rows:
+            md_by_key.setdefault((r.model, r.engine, r.topology), r)
+
+        out: list[BenchRow] = []
+        seen_keys: set[tuple[str, str, str]] = set()
+        for cr in corpus_rows:
+            key = (cr.model, cr.engine, cr.topology)
+            seen_keys.add(key)
+            md = md_by_key.get(key)
+            if md and not cr.quality_8pk and md.quality_8pk:
+                cr.quality_8pk = md.quality_8pk   # borrow the 8-pack
+            out.append(cr)
+        # Append markdown rows the corpus didn't cover.
+        for r in md_rows:
+            if (r.model, r.engine, r.topology) in seen_keys:
+                continue
+            out.append(r)
+        return out, None
+
+    def _read_measurement_corpus(self) -> list[BenchRow]:
+        """Read every JSONL record from the #249 corpus dir into BenchRows.
+
+        Pure file read (no subprocess): the corpus lives at
+        ``results/measurement-records/<tag>__<fp>.jsonl``.  Each line is one
+        record; malformed lines are skipped (never crash the explorer).  Newer
+        lines win for a (model, engine, topology) key (the file is appended)."""
+        corpus_dir = self.repo_root / "results" / "measurement-records"
+        if not corpus_dir.is_dir():
+            return []
+        by_key: dict[tuple[str, str, str], BenchRow] = {}
+        for path in sorted(corpus_dir.glob("*.jsonl")):
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for line in text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                row = bench_row_from_corpus_record(rec)
+                if row is not None:
+                    by_key[(row.model, row.engine, row.topology)] = row
+        return list(by_key.values())
+
+    # ── Validate / Evidence: rebench run tags + paste-ready report (READ) ─────────
+
+    async def evidence_list(self) -> list[EvidenceTag]:
+        """Enumerate ``results/rebench/<tag>/`` run directories (READ).
+
+        Pure filesystem walk: each subdirectory of ``results/rebench/`` is a run
+        tag.  We surface what artifacts it carries (REPORT.md / _internal.json /
+        soak) + a coarse date + a one-line TL;DR scraped from REPORT.md if
+        present.  Sorted newest-first by directory mtime."""
+        base = self.repo_root / "results" / "rebench"
+        if not base.is_dir():
+            return []
+        tags: list[EvidenceTag] = []
+        for d in sorted(
+            (p for p in base.iterdir() if p.is_dir()),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        ):
+            report = d / "REPORT.md"
+            internal = d / "_internal.json"
+            has_report = report.is_file()
+            et = EvidenceTag(
+                tag=d.name,
+                path=str(d),
+                has_report=has_report,
+                has_internal=internal.is_file(),
+                has_soak=(d / "soak.log").is_file() or (d / "soak-artifacts").is_dir(),
+            )
+            if has_report:
+                et.date, et.tldr = self._scrape_report_meta(report)
+            if not et.date:
+                # mtime fallback (YYYY-MM-DD).
+                import datetime as _dt
+
+                et.date = _dt.datetime.fromtimestamp(d.stat().st_mtime).strftime("%Y-%m-%d")
+            tags.append(et)
+        return tags
+
+    def _scrape_report_meta(self, report_path: Path) -> tuple[str, str]:
+        """Pull (date, tldr) from a REPORT.md without importing the generator.
+
+        REAL shape (verified live): a ``## TL;DR`` section of ``- `` bullets and
+        a ``## Meta`` section with ``- **Date:** YYYY-MM-DD``."""
+        try:
+            text = report_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return "", ""
+        date = ""
+        m = re.search(r"\*\*Date:\*\*\s*`?(\d{4}-\d{2}-\d{2})`?", text)
+        if m:
+            date = m.group(1)
+        # First TL;DR bullet → coarse one-liner (strip markdown emphasis).
+        tldr = ""
+        in_tldr = False
+        for line in text.splitlines():
+            if line.strip().lower().startswith("## tl;dr"):
+                in_tldr = True
+                continue
+            if in_tldr:
+                s = line.strip()
+                if s.startswith("- "):
+                    tldr = re.sub(r"[*`]", "", s[2:]).strip()
+                    break
+                if s.startswith("#"):
+                    break
+        return date, tldr
+
+    async def evidence_report(
+        self, tag: str, *, compare_to: Optional[str] = None
+    ) -> EvidenceReport:
+        """Generate a paste-ready report for a run tag (READ — reads results).
+
+        Uses ``scripts/rebench-report.py <tag_dir>`` (the canonical generator —
+        report generation reads results, allowed live this phase).  It writes
+        ``REPORT.md`` into the tag dir and we read it back; if generation fails
+        but a REPORT.md already exists, we fall back to the existing file."""
+        base = self.repo_root / "results" / "rebench" / tag
+        if not base.is_dir():
+            return EvidenceReport(tag=tag, error=f"no run dir results/rebench/{tag}")
+        cmd = ["python3", "scripts/rebench-report.py", str(base), "--no-discuss"]
+        if compare_to:
+            cmp_dir = self.repo_root / "results" / "rebench" / compare_to
+            cmd += ["--compare-to", str(cmp_dir)]
+        res = await self._runner.run(cmd, cwd=str(self.repo_root), timeout=120.0)
+        report_md = base / "REPORT.md"
+        if report_md.is_file():
+            try:
+                body = report_md.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                return EvidenceReport(tag=tag, report_path=str(report_md), error=str(exc))
+            return EvidenceReport(tag=tag, report_path=str(report_md), body=body)
+        # Generation produced no REPORT.md and none pre-existed.
+        return EvidenceReport(
+            tag=tag,
+            error=(res.stderr.strip()[:200] or f"report generation failed (rc={res.returncode})"),
+        )
+
+    # ── Validate / Evidence: submit-bench (OUTWARD-FACING WRITE — gated) ───────────
+
+    async def submit_bench_preview(self, tag: str) -> dict[str, Any]:
+        """Generate the BENCHMARKS.md row for a tag WITHOUT submitting (READ-ish).
+
+        ``submit-bench.sh --tag <tag>`` (no ``--auto-submit``) only writes a
+        local ``BENCHMARKS-row.md`` into the tag dir and prints the row — it does
+        NOT touch the network or open a PR (verified live: the network/PR path is
+        gated behind ``--auto-submit``).  This lets the UI show the row before
+        the user confirms the outward submit.  Returns ``{"row","error"}``."""
+        res = await self._runner.run(
+            ["bash", "scripts/submit-bench.sh", "--tag", tag],
+            cwd=str(self.repo_root),
+            timeout=60.0,
+        )
+        if res.timed_out:
+            return {"row": "", "error": f"timed out generating row for {tag}"}
+        # The row is also written to results/rebench/<tag>/BENCHMARKS-row.md.
+        row_file = self.repo_root / "results" / "rebench" / tag / "BENCHMARKS-row.md"
+        row = ""
+        if row_file.is_file():
+            try:
+                row = row_file.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                row = ""
+        if not row:
+            row = (res.stdout or "").strip()
+        if not row:
+            return {"row": "", "error": (res.stderr.strip()[:200] or "no row generated")}
+        return {"row": row, "error": None}
+
+    def submit_bench(self, tag: str, *, as_pr: bool = False) -> ActionPlan:
+        """Build the OUTWARD-FACING submit-bench ActionPlan (NEVER auto-fired).
+
+        ``submit-bench.sh --tag <tag> --auto-submit [--as-pr]`` opens the network
+        path (``gh pr create`` / the localmaxxing POST).  This is an outward
+        write that LEAVES THE RIG, so the plan is built but NEVER executed
+        automatically: ``requires_confirm=True`` + ``network=True`` so the UI
+        shows a network-warning confirm, and tests mock the network.  It does not
+        claim a GPU → ``requires_reconcile=False``."""
+        cmd = ["bash", "scripts/submit-bench.sh", "--tag", tag, "--auto-submit"]
+        if as_pr:
+            cmd.append("--as-pr")
+        return ActionPlan(
+            kind="submit_bench",
+            cmd=cmd,
+            description=f"submit-bench --tag {tag} --auto-submit{' --as-pr' if as_pr else ''}",
+            requires_reconcile=False,
+            requires_confirm=True,
+            network=True,
+        )
+
+    # ── Power cap: read (safe) + write/sweep (WIRED, mock-only, confirm) ──────────
+
+    async def power_cap_get(self) -> PowerCapState:
+        """gpu-mode power-cap status → PowerCapState (READ — safe to call live).
+
+        Verified live: prints a banner + a per-GPU ``index, limit W, default W,
+        min W, max W`` table."""
+        res = await self._runner.run(
+            ["bash", "scripts/gpu-mode.sh", "power-cap", "status"],
+            cwd=str(self.repo_root),
+            timeout=20.0,
+        )
+        if res.timed_out:
+            st = PowerCapState(error="timed out reading power-cap status")
+            return st
+        return parse_power_cap_status(res.stdout or res.stderr)
+
+    def power_cap_set(self, state: str) -> ActionPlan:
+        """Build the power-cap WRITE ActionPlan (WIRED, mock-only — rig mutation).
+
+        Verified live: ``gpu-mode power-cap`` takes ``on`` (re-apply the 230W
+        cap) / ``off`` (uncap to hardware default) — NOT an arbitrary wattage.
+        Mutating a GPU power limit is a rig change, so this is built but NEVER
+        run live this phase; it goes through a confirm modal.  It does not claim
+        a GPU → ``requires_reconcile=False``."""
+        if state not in ("on", "off"):
+            raise ValueError(
+                f"power-cap state must be 'on' (re-apply 230W) or 'off' (uncap), got {state!r}"
+            )
+        return ActionPlan(
+            kind="power_cap",
+            cmd=["bash", "scripts/gpu-mode.sh", "power-cap", state],
+            description=f"gpu-mode power-cap {state}",
+            requires_reconcile=False,
+            requires_confirm=True,
+        )
+
+    def power_cap_sweep(self, *, step_size: Optional[int] = None,
+                        caps: Optional[list[int]] = None) -> ActionPlan:
+        """Build the power-cap-sweep ActionPlan (WIRED, mock-only — rig mutation).
+
+        ``power-cap-sweep.sh`` runs a power-limit A/B sweep (needs sudo on the
+        real rig) — it mutates the GPU power cap repeatedly AND runs benches at
+        each cap.  Heavy + mutating, so built-but-NEVER-run-live; confirm-gated.
+        ``--caps`` / ``--step-size`` are passed through when supplied."""
+        cmd = ["sudo", "bash", "scripts/power-cap-sweep.sh"]
+        if caps:
+            cmd += ["--caps", ",".join(str(c) for c in caps)]
+        if step_size:
+            cmd += ["--step-size", str(step_size)]
+        return ActionPlan(
+            kind="power_cap_sweep",
+            cmd=cmd,
+            description=f"power-cap-sweep{(' caps=' + ','.join(map(str, caps))) if caps else ''}".strip(),
+            requires_reconcile=False,
+            requires_confirm=True,
+        )
+
+    # ── Prune: gpu-mode prune / prune-all (WIRED, mock-only, confirm) ─────────────
+
+    def prune(self, *, all: bool = False) -> ActionPlan:
+        """Build the image-prune ActionPlan (WIRED, mock-only — DESTRUCTIVE).
+
+        ``gpu-mode prune`` = ``docker image prune -a`` (unreferenced images);
+        ``gpu-mode prune-all`` ALSO drops build cache + dangling networks.  Both
+        DELETE data, so this is built but NEVER run live this phase and is
+        confirm-gated.  It does not claim a GPU → ``requires_reconcile=False``."""
+        mode = "prune-all" if all else "prune"
+        return ActionPlan(
+            kind="prune",
+            cmd=["bash", "scripts/gpu-mode.sh", mode],
+            description=f"gpu-mode {mode}",
+            requires_reconcile=False,
+            requires_confirm=True,
+        )
+
+    # ── Container: top (READ) + rm (WIRED, mock-only, reconcile-gated) ────────────
+
+    async def container_top(self, name: str) -> ContainerTop:
+        """docker top <name> → ContainerTop (READ — never mutates the container)."""
+        res = await self._runner.run(
+            ["docker", "top", name],
+            cwd=str(self.repo_root),
+            timeout=15.0,
+        )
+        if res.timed_out:
+            return ContainerTop(name=name, error=f"timed out reading top for {name}")
+        text = res.stdout or ""
+        if res.returncode != 0 and not text.strip():
+            return ContainerTop(name=name, error=(res.stderr.strip()[:200] or f"rc={res.returncode}"))
+        return parse_docker_top(name, text)
+
+    def container_rm(self, name: str, *, force: bool = False, force_reason: str = "") -> ActionPlan:
+        """Build the ``docker rm`` ActionPlan (WIRED, mock-only — RECONCILE-GATED).
+
+        Removing a container frees a GPU it held, so this MUST route through the
+        reconcile gate (``requires_reconcile=True``) exactly like a stop — the
+        gate sees that the rm collides with the running container and surfaces
+        it.  ``docker rm`` cannot remove a running container without ``-f``;
+        the ``force`` flag adds ``-f`` AND becomes the reconcile force override
+        (so the rm of a live container is an explicit, reasoned action)."""
+        cmd = ["docker", "rm"]
+        if force:
+            if not force_reason:
+                raise ValueError("force=True requires a force_reason (surfaced to user)")
+            cmd.append("-f")
+        cmd.append(name)
+        return ActionPlan(
+            kind="container_rm",
+            cmd=cmd,
+            description=f"docker rm {'-f ' if force else ''}{name}",
+            requires_reconcile=True,     # frees a GPU → gate it
+            requires_confirm=True,
+            force=force,
+            force_reason=force_reason,
+        )
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────────
