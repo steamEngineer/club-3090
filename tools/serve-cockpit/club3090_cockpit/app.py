@@ -1,9 +1,9 @@
 """club3090 serve cockpit — main Textual application.
 
-Phase 1: walking skeleton.
+Phase 1: walking skeleton — visual mockups enriched for design review.
   - Full 4-mode nav (Discover / Serve / Estate / Validate)
   - Real Catalog DataTable populated from registry_variant_rows
-  - All other panels are static placeholder stubs
+  - All other panels are static illustrative mockups (hardcoded, clearly labelled)
   - No actions wired (Enter pops a "wired in Phase 3" toast)
 """
 
@@ -16,9 +16,11 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, ScrollableContainer
 from textual.screen import ModalScreen
 from textual.widgets import (
+    Button,
     DataTable,
     Footer,
     Header,
+    Input,
     Label,
     Static,
     TabbedContent,
@@ -91,6 +93,9 @@ class HelpScreen(ModalScreen):
   data (registry_variant_rows).  Serve / Estate / Validate and all
   action bindings are stubbed — they will be wired in Phase 3.
 
+  All GPU numbers, container rows, bench rows, logs, and statuses in
+  the non-Catalog panels are hardcoded illustrative mockup data.
+
 [bold]Stub columns in Catalog[/bold]
 
   fit · TPS · 8pk · source  are placeholder glyphs (·/—).
@@ -140,6 +145,11 @@ class CatalogPane(Container):
     CatalogPane DataTable {
         height: 1fr;
     }
+    CatalogPane #catalog-hint {
+        height: 1;
+        color: $text-muted;
+        padding: 0 1;
+    }
     """
 
     def compose(self) -> ComposeResult:
@@ -147,6 +157,10 @@ class CatalogPane(Container):
         table: DataTable = DataTable(id="catalog-table", zebra_stripes=True)
         table.cursor_type = "row"
         yield table
+        yield Label(
+            "[dim]\\[/] filter   \\[⏎] serve   \\[e] explain   \\[b] BYO fit-check[/dim]",
+            id="catalog-hint",
+        )
 
     def on_mount(self) -> None:
         table = self.query_one("#catalog-table", DataTable)
@@ -175,6 +189,594 @@ class CatalogPane(Container):
                 _status_glyph(r.status),
                 r.source,        # stub: "·"
             )
+
+
+class ByoPane(Container):
+    """Bring-your-own tab: illustrative mockup of the HF fit-check flow."""
+
+    DEFAULT_CSS = """
+    ByoPane {
+        height: 1fr;
+        padding: 1 2;
+    }
+    ByoPane #byo-heading {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    ByoPane #byo-input-row {
+        height: 3;
+        margin-bottom: 1;
+    }
+    ByoPane #byo-url-input {
+        width: 1fr;
+    }
+    ByoPane #byo-fit-btn {
+        width: 18;
+        margin-left: 1;
+    }
+    ByoPane #byo-example-card {
+        border: solid $primary;
+        padding: 1 2;
+        margin-top: 1;
+        height: auto;
+    }
+    ByoPane #byo-example-label {
+        color: $text-muted;
+        margin-bottom: 1;
+    }
+    ByoPane #byo-phase-note {
+        color: $text-muted;
+        margin-top: 1;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Label("Bring-your-own HF model", id="byo-heading")
+        with Horizontal(id="byo-input-row"):
+            yield Input(placeholder="org/Model  (e.g. unsloth/Qwen3-27B-abliterated-GGUF)",
+                        id="byo-url-input")
+            yield Button("Fit-check", id="byo-fit-btn", variant="primary")
+        yield Label("[dim](example result — Phase 3)[/dim]", id="byo-example-label")
+        yield Static(
+            "[bold]Route C verdict[/bold]  [dim](example)[/dim]\n\n"
+            "  arch:  [cyan]Qwen3_5ForConditionalGeneration[/cyan]\n"
+            "         → curated [green]'qwen3.6-27b'[/green]\n\n"
+            "  [bold]Route C:[/bold] reuse compose + swap weights\n\n"
+            "  • match [yellow]--quantization[/yellow] to weight dtype\n"
+            "  • drop  [yellow]--speculative-config[/yellow]  (no MTP head in fine-tune)\n"
+            "  • fits GPU0+GPU1 (~23.1 / 48.0 GiB) [dim](illustrative)[/dim]\n\n"
+            "  [dim]Suggested slug: vllm/dual  ·  swap weights path → Phase 3[/dim]",
+            id="byo-example-card",
+        )
+        yield Label(
+            "[dim]Not wired — Phase 3[/dim]",
+            id="byo-phase-note",
+        )
+
+
+# ── Serve pane ────────────────────────────────────────────────────────────────
+
+
+class ServePane(Container):
+    """Serve mode: illustrative plan-confirm box mockup (§7 #8)."""
+
+    DEFAULT_CSS = """
+    ServePane {
+        height: 1fr;
+        padding: 1 2;
+    }
+    ServePane #serve-heading {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    ServePane #serve-plan-box {
+        border: solid $primary;
+        padding: 1 2;
+        height: auto;
+        margin-bottom: 1;
+    }
+    ServePane #serve-plan-title {
+        text-style: bold;
+        color: $accent;
+        margin-bottom: 1;
+    }
+    ServePane #serve-btn-row {
+        height: 3;
+        margin-top: 1;
+    }
+    ServePane #serve-launch-btn {
+        width: 14;
+    }
+    ServePane #serve-force-btn {
+        width: 12;
+        margin-left: 1;
+    }
+    ServePane #serve-cancel-btn {
+        width: 12;
+        margin-left: 1;
+    }
+    ServePane #serve-phase-note {
+        color: $text-muted;
+        margin-top: 1;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Label("Serve", id="serve-heading")
+        with Container(id="serve-plan-box"):
+            yield Label("Launch plan  [dim](example)[/dim]", id="serve-plan-title")
+            yield Static(
+                "  [bold]Slug[/bold]      llamacpp/qwen27b-pi-reasoning-single\n"
+                "  [bold]Engine[/bold]    llama.cpp\n"
+                "  [bold]KV[/bold]        q4_0 / q4_0\n"
+                "  [bold]Fit[/bold]       [green]● fits GPU0[/green]  ~22.7 / 24.0 GiB  [dim](illustrative)[/dim]\n"
+                "  [bold]Max ctx[/bold]   188K\n"
+                "  [bold]Tears down[/bold] gemma-int8  (GPU0)  [dim](illustrative)[/dim]",
+                id="serve-plan-detail",
+            )
+        with Horizontal(id="serve-btn-row"):
+            yield Button("⏎ Launch", id="serve-launch-btn", variant="success")
+            yield Button("F Force", id="serve-force-btn", variant="warning")
+            yield Button("Esc Cancel", id="serve-cancel-btn")
+        yield Label(
+            "[dim]Not wired — Phase 3  ·  ⏎ Launch / F Force / Esc Cancel[/dim]",
+            id="serve-phase-note",
+        )
+
+
+# ── Estate pane content ───────────────────────────────────────────────────────
+
+
+class EstateOrchPane(Container):
+    """Estate / Orchestration tab: GPU cards, Doctor, scene table, services."""
+
+    DEFAULT_CSS = """
+    EstateOrchPane {
+        height: 1fr;
+    }
+    EstateOrchPane #orch-scroll {
+        height: 1fr;
+    }
+    EstateOrchPane .gpu-card {
+        border: solid $primary;
+        padding: 0 1;
+        margin: 0 1 1 1;
+        height: auto;
+    }
+    EstateOrchPane .gpu-card-title {
+        text-style: bold;
+        color: $accent;
+    }
+    EstateOrchPane #doctor-line {
+        padding: 0 1;
+        margin: 0 1 1 1;
+        color: $text;
+    }
+    EstateOrchPane #scene-heading {
+        text-style: bold;
+        padding: 0 1;
+        margin: 0 1 0 1;
+    }
+    EstateOrchPane DataTable {
+        height: auto;
+        margin: 0 1 1 1;
+    }
+    EstateOrchPane #services-heading {
+        text-style: bold;
+        padding: 0 1;
+        margin: 0 1 0 1;
+    }
+    EstateOrchPane #services-strip {
+        padding: 0 1;
+        margin: 0 1 1 1;
+    }
+    EstateOrchPane #orch-phase-note {
+        padding: 0 1;
+        margin: 0 1;
+        color: $text-muted;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        with ScrollableContainer(id="orch-scroll"):
+            # GPU 0 card
+            with Container(classes="gpu-card", id="gpu0-card"):
+                yield Label("GPU0  RTX 3090  [dim](mock — Phase 3)[/dim]", classes="gpu-card-title")
+                yield Static(
+                    "  [green]███████████████[/green][dim]░░░░░[/dim]  18.3 / 24.0 GiB · 71%\n"
+                    "  312 / 370 W · 64°C",
+                    id="gpu0-bar",
+                )
+            # GPU 1 card
+            with Container(classes="gpu-card", id="gpu1-card"):
+                yield Label("GPU1  RTX 3090  [dim](mock — Phase 3)[/dim]", classes="gpu-card-title")
+                yield Static(
+                    "  [yellow]██████████[/yellow][dim]██████████[/dim]  12.1 / 24.0 GiB · 45%\n"
+                    "  198 / 370 W · 58°C",
+                    id="gpu1-bar",
+                )
+            # Doctor
+            yield Static(
+                "[green]●[/green] serving · KV pool 61% · spec-dec firing (MTP n=2, 73% accept) · "
+                "0 recent errors  [dim](mock — Phase 3)[/dim]",
+                id="doctor-line",
+            )
+            # Scene table
+            yield Label("Scenes  [dim](illustrative)[/dim]", id="scene-heading")
+            scene_table: DataTable = DataTable(
+                id="scene-table", zebra_stripes=True, show_cursor=False
+            )
+            yield scene_table
+            # Services strip
+            yield Label("Services  [dim](illustrative)[/dim]", id="services-heading")
+            yield Static(
+                "  OpenWebUI [green]●[/green]   LiteLLM [green]●[/green]   Qdrant [green]●[/green]"
+                "   SearXNG [yellow]○[/yellow]   ComfyUI [dim]○[/dim]",
+                id="services-strip",
+            )
+            yield Label(
+                "[dim]Not wired — Phase 3[/dim]",
+                id="orch-phase-note",
+            )
+
+    def on_mount(self) -> None:
+        t = self.query_one("#scene-table", DataTable)
+        t.add_columns("Scene", "Group", "GPUs", "Services")
+        t.add_row("[bold cyan]27b[/bold cyan]", "serving", "0,1", "vllm-qwen36-27b")
+        t.add_row("gemma-int8", "serving", "0,1", "vllm-gemma4-31b")
+        t.add_row("deckard", "serving", "0", "llamacpp-deckard")
+        t.add_row("image-studio", "studio", "0,1", "comfyui · webui · gemma-12b")
+        t.add_row("video-studio", "studio", "0,1", "comfyui · director · gallery")
+
+
+class EstateContainersPane(Container):
+    """Estate / Containers tab: container list + drill-down area."""
+
+    DEFAULT_CSS = """
+    EstateContainersPane {
+        height: 1fr;
+    }
+    EstateContainersPane #containers-heading {
+        text-style: bold;
+        padding: 0 1;
+        margin: 0 1 0 1;
+    }
+    EstateContainersPane #containers-table {
+        height: auto;
+        margin: 0 1 0 1;
+        max-height: 12;
+    }
+    EstateContainersPane #drill-tabs {
+        height: 1fr;
+        margin: 1 1 0 1;
+        border: solid $primary;
+    }
+    EstateContainersPane #drill-logs {
+        padding: 1;
+        color: $text;
+    }
+    EstateContainersPane #drill-stats {
+        padding: 1;
+        color: $text;
+    }
+    EstateContainersPane #drill-config {
+        padding: 1;
+        color: $text-muted;
+    }
+    EstateContainersPane #containers-phase-note {
+        padding: 0 1;
+        margin: 0 1;
+        color: $text-muted;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Label(
+            "Containers  [dim](mock — Phase 3)[/dim]",
+            id="containers-heading",
+        )
+        ct: DataTable = DataTable(
+            id="containers-table", zebra_stripes=True, show_cursor=True
+        )
+        ct.cursor_type = "row"
+        yield ct
+        with TabbedContent(id="drill-tabs"):
+            with TabPane("Logs", id="drill-tab-logs"):
+                yield Static(
+                    "[dim]2026-06-18 14:23:01[/dim] INFO  Starting vllm worker on GPU0\n"
+                    "[dim]2026-06-18 14:23:04[/dim] INFO  Model weights loaded (22.7 GiB)\n"
+                    "[dim]2026-06-18 14:23:07[/dim] INFO  KV cache allocated 61% (int8_per_token_head)\n"
+                    "[dim]2026-06-18 14:23:08[/dim] INFO  MTP drafter attached (n=2)\n"
+                    "[dim]2026-06-18 14:23:09[/dim] INFO  Server started on :8010\n"
+                    "[dim]2026-06-18 14:23:11[/dim] INFO  First request served (TTFT 0.21s)\n"
+                    "[dim](illustrative log lines — Phase 3)[/dim]",
+                    id="drill-logs",
+                )
+            with TabPane("Stats", id="drill-tab-stats"):
+                yield Static(
+                    "  CPU    [green]███[/green][dim]░░░░░░░░░░░░░░░░░[/dim]  14 %\n"
+                    "  MEM    [green]████████████[/green][dim]████████[/dim]  61 %\n"
+                    "  GPU0   [green]███████████████[/green][dim]░░░░░[/dim]  71 %  18.3 GiB\n"
+                    "  GPU1   [yellow]██████████[/yellow][dim]██████████[/dim]  45 %  12.1 GiB\n"
+                    "  [dim](illustrative — Phase 3)[/dim]",
+                    id="drill-stats",
+                )
+            with TabPane("Config", id="drill-tab-config"):
+                yield Static(
+                    "  image=vllm/vllm-openai:v0.22.0\n"
+                    "  --model /mnt/models/huggingface/qwen3.6-27b/\n"
+                    "  --tensor-parallel-size 2\n"
+                    "  --max-model-len 295000\n"
+                    "  --kv-cache-dtype int8_per_token_head\n"
+                    "  --speculative-config '{\"method\":\"mtp\",\"num_speculative_tokens\":2}'\n"
+                    "  [dim](illustrative — Phase 3)[/dim]",
+                    id="drill-config",
+                )
+        yield Label(
+            "[dim]Not wired — Phase 3[/dim]",
+            id="containers-phase-note",
+        )
+
+    def on_mount(self) -> None:
+        t = self.query_one("#containers-table", DataTable)
+        t.add_columns("Name", "Kind", "Status", "Uptime", "Restarts", "Ports", "GPU", "Slug")
+        t.add_row(
+            "[bold]vllm-qwen36-27b[/bold]", "engine",
+            "[green]running[/green]", "2h14m", "0", "8010", "0,1", "vllm/dual",
+        )
+        t.add_row(
+            "open-webui", "service",
+            "[green]running[/green]", "6d", "1", "3000", "—", "—",
+        )
+        t.add_row(
+            "litellm-proxy", "service",
+            "[green]running[/green]", "6d", "0", "4000", "—", "—",
+        )
+        t.add_row(
+            "qdrant", "service",
+            "[green]running[/green]", "6d", "0", "6333", "—", "—",
+        )
+
+
+# ── Validate pane content ─────────────────────────────────────────────────────
+
+
+class ValidateRunPane(Container):
+    """Validate / Run tab: ladder steps + extra tools + output area."""
+
+    DEFAULT_CSS = """
+    ValidateRunPane {
+        height: 1fr;
+    }
+    ValidateRunPane #run-scroll {
+        height: 1fr;
+    }
+    ValidateRunPane #run-heading {
+        text-style: bold;
+        padding: 0 1;
+        margin: 0 1 0 1;
+    }
+    ValidateRunPane #run-ladder {
+        border: solid $primary;
+        padding: 1 2;
+        margin: 0 1 1 1;
+        height: auto;
+    }
+    ValidateRunPane #run-extras {
+        border: solid $primary;
+        padding: 1 2;
+        margin: 0 1 1 1;
+        height: auto;
+    }
+    ValidateRunPane #run-output {
+        border: solid $primary;
+        padding: 1 2;
+        margin: 0 1 1 1;
+        height: auto;
+        color: $text-muted;
+    }
+    ValidateRunPane #run-phase-note {
+        padding: 0 1;
+        margin: 0 1;
+        color: $text-muted;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        with ScrollableContainer(id="run-scroll"):
+            yield Label(
+                "Run  [dim](illustrative — Phase 4)[/dim]",
+                id="run-heading",
+            )
+            yield Static(
+                "[bold]Validation ladder[/bold]  [dim](example steps)[/dim]\n\n"
+                "  [cyan]▷[/cyan] verify-full         [green]✓[/green]   [dim]0m 18s[/dim]\n"
+                "  [cyan]▷[/cyan] verify-stress       [green]✓[/green]   [dim]4m 02s[/dim]\n"
+                "  [cyan]▷[/cyan] bench               [green]✓[/green]   [dim]1m 35s[/dim]\n"
+                "  [cyan]▷[/cyan] quality-test        [dim]–[/dim]   [dim]not run[/dim]\n"
+                "  [cyan]▷[/cyan] soak-test           [dim]–[/dim]   [dim]not run[/dim]\n"
+                "  [cyan]▷[/cyan] rebench-full        [dim]–[/dim]   [dim]not run[/dim]",
+                id="run-ladder",
+            )
+            yield Static(
+                "[bold]Extra tools[/bold]  [dim](illustrative)[/dim]\n\n"
+                "  [cyan]▷[/cyan] quality-baseline    [dim]–[/dim]   [dim]regression diff vs baseline[/dim]\n"
+                "  [cyan]▷[/cyan] bench-agentic       [dim]–[/dim]   [dim]multi-turn prefill stress[/dim]\n"
+                "  [cyan]▷[/cyan] stream-toolcall-probe  [dim]–[/dim]   [dim]silent streaming check[/dim]",
+                id="run-extras",
+            )
+            yield Static(
+                "[dim]Output  (select a step above and press ⏎ to run — Phase 4)[/dim]\n\n"
+                "  [dim]…[/dim]",
+                id="run-output",
+            )
+            yield Label(
+                "[dim]Not wired — Phase 4[/dim]",
+                id="run-phase-note",
+            )
+
+
+class ValidateDoctorPane(Container):
+    """Validate / Doctor tab: health/estate/profile cards."""
+
+    DEFAULT_CSS = """
+    ValidateDoctorPane {
+        height: 1fr;
+        padding: 1 2;
+    }
+    ValidateDoctorPane #doctor-heading {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    ValidateDoctorPane .doctor-card {
+        border: solid $primary;
+        padding: 1 2;
+        margin-bottom: 1;
+        height: auto;
+    }
+    ValidateDoctorPane .doctor-card-title {
+        text-style: bold;
+        color: $accent;
+        margin-bottom: 1;
+    }
+    ValidateDoctorPane #doctor-phase-note {
+        color: $text-muted;
+        margin-top: 1;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Label(
+            "Doctor  [dim](illustrative — Phase 4)[/dim]",
+            id="doctor-heading",
+        )
+        with Container(classes="doctor-card", id="doctor-card-health"):
+            yield Label("health.sh", classes="doctor-card-title")
+            yield Static(
+                "[green]✓[/green]  serving  ·  KV pool 61%  ·  spec-dec firing (MTP n=2, 73% accept)\n"
+                "[green]✓[/green]  0 recent errors  ·  TTFT p50 0.22s  ·  decode p50 178 TPS\n"
+                "[dim](mock — Phase 3)[/dim]",
+            )
+        with Container(classes="doctor-card", id="doctor-card-estate"):
+            yield Label("diagnose-estate", classes="doctor-card-title")
+            yield Static(
+                "[green]✓[/green]  estate plan coherent  ·  no VRAM over-commit\n"
+                "[yellow]⚠[/yellow]  gemma-int8 on GPU0 not in active scene — orphan risk\n"
+                "[dim](mock — Phase 3)[/dim]",
+            )
+        with Container(classes="doctor-card", id="doctor-card-profile"):
+            yield Label("diagnose-profile  [dim]vllm/dual[/dim]", classes="doctor-card-title")
+            yield Static(
+                "[green]✓[/green]  engine pin valid (v0.22.0)  ·  patches apply clean\n"
+                "[green]✓[/green]  kv-calc fits (22.7 / 24.0 GiB)  ·  compose mounts resolve\n"
+                "[dim](mock — Phase 3)[/dim]",
+            )
+        yield Label(
+            "[dim]Not wired — Phase 4[/dim]",
+            id="doctor-phase-note",
+        )
+
+
+class ValidateBenchmarksPane(Container):
+    """Validate / Benchmarks tab: stub DataTable of measured results."""
+
+    DEFAULT_CSS = """
+    ValidateBenchmarksPane {
+        height: 1fr;
+    }
+    ValidateBenchmarksPane #bench-heading {
+        text-style: bold;
+        padding: 0 1;
+        margin: 0 1 0 1;
+    }
+    ValidateBenchmarksPane #bench-table {
+        height: 1fr;
+        margin: 0 1 1 1;
+    }
+    ValidateBenchmarksPane #bench-phase-note {
+        padding: 0 1;
+        margin: 0 1;
+        color: $text-muted;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Label(
+            "Benchmarks  [dim](illustrative — real data via §5.2 corpus · Phase 4)[/dim]",
+            id="bench-heading",
+        )
+        bt: DataTable = DataTable(
+            id="bench-table", zebra_stripes=True, show_cursor=True
+        )
+        bt.cursor_type = "row"
+        yield bt
+        yield Label(
+            "[dim]Not wired — Phase 4[/dim]",
+            id="bench-phase-note",
+        )
+
+    def on_mount(self) -> None:
+        t = self.query_one("#bench-table", DataTable)
+        t.add_columns("Model", "Engine", "Topo", "TPS (n/c)", "ctx", "8pk")
+        t.add_row(
+            "qwen3.6-27b", "vllm", "dual",
+            "[dim]174 / 42[/dim]", "295K", "[dim]109[/dim]",
+        )
+        t.add_row(
+            "qwen3.6-27b", "beellama", "dual",
+            "[dim]155 / 38[/dim]", "102K", "[dim]107[/dim]",
+        )
+        t.add_row(
+            "gemma-4-31b", "vllm", "dual",
+            "[dim]112 / 29[/dim]", "192K", "[dim]103[/dim]",
+        )
+        t.add_row(
+            "qwen3.6-35b-a3b", "vllm", "dual",
+            "[dim]178 / 44[/dim]", "262K", "[dim]90[/dim]",
+        )
+
+
+class ValidateEvidencePane(Container):
+    """Validate / Evidence tab: list of past-run tags."""
+
+    DEFAULT_CSS = """
+    ValidateEvidencePane {
+        height: 1fr;
+        padding: 1 2;
+    }
+    ValidateEvidencePane #evidence-heading {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    ValidateEvidencePane #evidence-list {
+        border: solid $primary;
+        padding: 1 2;
+        height: auto;
+    }
+    ValidateEvidencePane #evidence-phase-note {
+        color: $text-muted;
+        margin-top: 1;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Label(
+            "Evidence  [dim](illustrative — Phase 4)[/dim]",
+            id="evidence-heading",
+        )
+        yield Static(
+            "[bold]Past runs[/bold]  [dim](example tags)[/dim]\n\n"
+            "  results/rebench/[cyan]vllm-dual-20260618[/cyan]  ·  2026-06-18  ·  [green]PASS[/green]  ·  [dim][view report][/dim]\n"
+            "  results/rebench/[cyan]vllm-dual-20260615[/cyan]  ·  2026-06-15  ·  [green]PASS[/green]  ·  [dim][view report][/dim]\n"
+            "  results/rebench/[cyan]gemma-int8-20260614[/cyan] ·  2026-06-14  ·  [green]PASS[/green]  ·  [dim][view report][/dim]\n"
+            "  results/rebench/[cyan]qwen35b-a3b-20260612[/cyan] · 2026-06-12  ·  [yellow]WARN[/yellow]  ·  [dim][view report][/dim]\n"
+            "  [dim](illustrative — Phase 4)[/dim]",
+            id="evidence-list",
+        )
+        yield Label(
+            "[dim]Not wired — Phase 4[/dim]",
+            id="evidence-phase-note",
+        )
 
 
 # ── Mode switcher (left rail) ─────────────────────────────────────────────────
@@ -311,13 +913,6 @@ class CockpitApp(App):
         padding: 1 2;
         color: $text-muted;
     }
-    /* Estate GPU bar stub */
-    #estate-gpu-stub {
-        border: solid $primary;
-        margin: 1 1;
-        padding: 0 1;
-        height: auto;
-    }
     """
 
     def __init__(self, repo_root: Path, **kwargs):
@@ -337,127 +932,31 @@ class CockpitApp(App):
                         with TabPane("Catalog", id="tab-catalog"):
                             yield CatalogPane(id="catalog-pane")
                         with TabPane("Bring-your-own", id="tab-byo"):
-                            yield PlaceholderPanel(
-                                "Bring-your-own HF model",
-                                "Future flow (Phase 3):\n\n"
-                                "  1. Paste an HF repo slug or local path\n"
-                                "  2. Run pull.sh --profile-like <engine-slug> --dry-run\n"
-                                "  3. View the pull-gate verdict (arch supported? fits topology?)\n"
-                                "  4. For in-scope arches: generate-compose.sh emits a\n"
-                                "     reproduction compose as a runnable starting point\n\n"
-                                "Routes A (HF safetensors) · B (local GGUF) · C (fine-tune of\n"
-                                "a curated arch) will each surface the appropriate next step.\n\n"
-                                "[dim]Not wired — Phase 3[/dim]",
-                                id="byo-panel",
-                            )
+                            yield ByoPane(id="byo-panel")
 
                 # Mode 1 — Serve
                 with Container(id="panel-serve", classes="mode-panel"):
-                    yield PlaceholderPanel(
-                        "Serve",
-                        "Future flow (Phase 3):\n\n"
-                        "  Select a slug from Discover → Catalog, press ⏎\n"
-                        "  A plan-confirm modal surfaces:\n"
-                        "    slug · engine · KV · fit · est VRAM · what it tears down\n"
-                        "  Confirm (⏎) commits switch.sh <slug> and streams boot logs.\n"
-                        "  --force is only offered when preflight explicitly needs it.\n\n"
-                        "  --set-default / --clear-default are also wired here.\n"
-                        "  setup.sh handles missing weights.\n\n"
-                        "[dim]Not wired — Phase 3[/dim]",
-                        id="serve-panel",
-                    )
+                    yield ServePane(id="serve-panel")
 
                 # Mode 2 — Estate
                 with Container(id="panel-estate", classes="mode-panel"):
                     with TabbedContent(id="estate-tabs"):
                         with TabPane("Orchestration", id="tab-orchestration"):
-                            with ScrollableContainer():
-                                yield Static(
-                                    "[bold]GPU estate (stub)[/bold]",
-                                    id="estate-gpu-stub",
-                                )
-                                yield Static(
-                                    "  GPU0  ░░░░░░░░░░░░░░░░░░░░  1 MiB / 24 GiB  idle  ···W\n"
-                                    "  GPU1  ░░░░░░░░░░░░░░░░░░░░  1 MiB / 24 GiB  idle  ···W\n"
-                                    "  scene: [dim]off[/dim]",
-                                    id="estate-gpu-bars",
-                                )
-                                yield PlaceholderPanel(
-                                    "Orchestration",
-                                    "Future wiring (Phase 3):\n\n"
-                                    "  Live state via detect.py (docker-ps + nvidia-smi)\n"
-                                    "  Doctor: health.sh runtime health panel\n"
-                                    "  Scene switcher: gpu-mode --list-modes --json\n"
-                                    "  estate_cli boot/down/validate via facade + worker thread\n"
-                                    "  Every write goes through reconcile-before-write gate\n\n"
-                                    "  Stub scene list:\n"
-                                    "    [dim]serving:[/dim]  27b · gemma-int8 · deckard\n"
-                                    "    [dim]studio:[/dim]   image-studio · video-studio\n"
-                                    "    [dim]ops:[/dim]      off · prune · prune-all\n\n"
-                                    "[dim]Not wired — Phase 3[/dim]",
-                                )
+                            yield EstateOrchPane(id="estate-orch-pane")
                         with TabPane("Containers", id="tab-containers"):
-                            yield PlaceholderPanel(
-                                "Containers (lazydocker floor)",
-                                "Future wiring (Phase 3):\n\n"
-                                "  All stack containers grouped engines | services\n"
-                                "  Columns: name · kind · status/health · uptime ·\n"
-                                "           restarts · ports · GPU(s) · mapped slug/scene\n\n"
-                                "  Stub container list:\n"
-                                "    engines:   [dim](none running)[/dim]\n"
-                                "    services:  [dim](probe not wired)[/dim]\n\n"
-                                "  Drill (lazydocker tabs): Logs · Stats · Config\n"
-                                "  Lifecycle: restart · stop (behind confirm)\n\n"
-                                "[dim]Not wired — Phase 3[/dim]",
-                            )
+                            yield EstateContainersPane(id="estate-containers-pane")
 
                 # Mode 3 — Validate
                 with Container(id="panel-validate", classes="mode-panel"):
                     with TabbedContent(id="validate-tabs"):
                         with TabPane("Run", id="tab-run"):
-                            yield PlaceholderPanel(
-                                "Validate · Run",
-                                "Future wiring (Phase 4):\n\n"
-                                "  Ladder: verify-full · verify-stress · bench ·\n"
-                                "          quality-test · soak-test · rebench-full\n"
-                                "  Plus:   quality-baseline (regression diff vs curated baseline)\n"
-                                "          bench-agentic (multi-turn prefill stress)\n"
-                                "          stream-toolcall-probe (silent streaming breakage check)\n\n"
-                                "  Tuning gotchas inline (from BRING_YOUR_OWN.md §2):\n"
-                                "    ctx ceiling ≠ advertised; NIAH-allocation-isn't-use;\n"
-                                "    A/B at matched power (230↔370W lever);\n"
-                                "    judge spec-dec on bench delta not acceptance rate\n\n"
-                                "[dim]Not wired — Phase 4[/dim]",
-                            )
+                            yield ValidateRunPane(id="validate-run-pane")
                         with TabPane("Doctor", id="tab-doctor"):
-                            yield PlaceholderPanel(
-                                "Validate · Doctor",
-                                "Future wiring (Phase 4):\n\n"
-                                "  health.sh — runtime health (KV-pool, spec-dec firing, errors)\n"
-                                "  diagnose-estate.sh — estate-config diagnosis\n"
-                                "  diagnose-profile.sh — per-slug profile check (Tier-③)\n\n"
-                                "[dim]Not wired — Phase 4[/dim]",
-                            )
+                            yield ValidateDoctorPane(id="validate-doctor-pane")
                         with TabPane("Benchmarks", id="tab-benchmarks"):
-                            yield PlaceholderPanel(
-                                "Validate · Benchmarks",
-                                "Future wiring (Phase 4):\n\n"
-                                "  Filterable explorer of BENCHMARKS.md + the structured\n"
-                                "  measurement corpus (model / engine / topology / TPS / ctx / 8pk)\n"
-                                "  Our self-hosted alternative to localmaxxing.\n\n"
-                                "  submit-bench.sh — 'share to localmaxxing' action\n\n"
-                                "[dim]Not wired — Phase 4[/dim]",
-                            )
+                            yield ValidateBenchmarksPane(id="validate-benchmarks-pane")
                         with TabPane("Evidence", id="tab-evidence"):
-                            yield PlaceholderPanel(
-                                "Validate · Evidence",
-                                "Future wiring (Phase 4):\n\n"
-                                "  Browse results/rebench/<tag>/ artifact tree\n"
-                                "  (REPORT.md, soak logs, NIAH artifacts)\n"
-                                "  report.sh / rebench-report.py — paste-ready triage report\n"
-                                "  'export Results Card' action (RESULTS_CARD.md format)\n\n"
-                                "[dim]Not wired — Phase 4[/dim]",
-                            )
+                            yield ValidateEvidencePane(id="validate-evidence-pane")
         yield Footer()
 
     # ── Mount / startup ───────────────────────────────────────────────────────

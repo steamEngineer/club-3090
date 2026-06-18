@@ -5,6 +5,7 @@ Verifies:
   2. All four modes are reachable via digit-key bindings.
   3. Each mode's nav nodes exist in the DOM.
   4. The Catalog DataTable has the expected columns.
+  5. The Phase-1 mockup panes (Serve, Estate, Validate) render their major nodes.
 
 The registry is never called from tests — the catalog worker is patched to
 return an empty list so no subprocess is spawned.
@@ -18,9 +19,21 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 # Textual testing requires pytest-asyncio with asyncio_mode="auto"
-from textual.widgets import DataTable, TabbedContent, TabPane, Label
+from textual.widgets import Button, DataTable, Input, TabbedContent, TabPane, Label
 
-from club3090_cockpit.app import CockpitApp, CatalogPane, ModeSwitcher
+from club3090_cockpit.app import (
+    CockpitApp,
+    CatalogPane,
+    ModeSwitcher,
+    ByoPane,
+    ServePane,
+    EstateOrchPane,
+    EstateContainersPane,
+    ValidateRunPane,
+    ValidateDoctorPane,
+    ValidateBenchmarksPane,
+    ValidateEvidencePane,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -273,3 +286,122 @@ class TestPrimaryActionToast:
             async with app.run_test(size=(120, 40)) as pilot:
                 # Should not raise
                 await pilot.press("enter")
+
+
+class TestMockupPanesExist:
+    """Phase-1 mockup panels render their major DOM nodes."""
+
+    @pytest.mark.asyncio
+    async def test_byo_pane_nodes(self):
+        """BYO tab has the input, button, and example result card."""
+        app = _make_app()
+        with patch.object(app, "_load_catalog"):
+            async with app.run_test(size=(120, 40)) as pilot:
+                app.query_one("#byo-panel", ByoPane)
+                app.query_one("#byo-url-input", Input)
+                app.query_one("#byo-fit-btn", Button)
+                app.query_one("#byo-example-card")
+
+    @pytest.mark.asyncio
+    async def test_serve_pane_nodes(self):
+        """Serve panel has the plan-confirm box and button row."""
+        app = _make_app()
+        with patch.object(app, "_load_catalog"):
+            async with app.run_test(size=(120, 40)) as pilot:
+                app.query_one("#serve-panel", ServePane)
+                app.query_one("#serve-plan-box")
+                app.query_one("#serve-launch-btn", Button)
+                app.query_one("#serve-cancel-btn", Button)
+
+    @pytest.mark.asyncio
+    async def test_estate_orch_pane_nodes(self):
+        """Estate Orchestration tab has GPU cards, doctor line, and scene table."""
+        app = _make_app()
+        with patch.object(app, "_load_catalog"):
+            async with app.run_test(size=(120, 40)) as pilot:
+                app.query_one("#estate-orch-pane", EstateOrchPane)
+                app.query_one("#gpu0-card")
+                app.query_one("#gpu1-card")
+                app.query_one("#doctor-line")
+                app.query_one("#scene-table", DataTable)
+                app.query_one("#services-strip")
+
+    @pytest.mark.asyncio
+    async def test_estate_orch_scene_table_has_rows(self):
+        """Scene table should be populated with the illustrative rows."""
+        app = _make_app()
+        with patch.object(app, "_load_catalog"):
+            async with app.run_test(size=(120, 40)) as pilot:
+                t = app.query_one("#scene-table", DataTable)
+                assert t.row_count == 5  # 27b + gemma-int8 + deckard + image-studio + video-studio
+
+    @pytest.mark.asyncio
+    async def test_estate_containers_pane_nodes(self):
+        """Estate Containers tab has the container table and drill-down tabs."""
+        app = _make_app()
+        with patch.object(app, "_load_catalog"):
+            async with app.run_test(size=(120, 40)) as pilot:
+                app.query_one("#estate-containers-pane", EstateContainersPane)
+                app.query_one("#containers-table", DataTable)
+                app.query_one("#drill-tabs", TabbedContent)
+                app.query_one("#drill-tab-logs", TabPane)
+                app.query_one("#drill-tab-stats", TabPane)
+                app.query_one("#drill-tab-config", TabPane)
+
+    @pytest.mark.asyncio
+    async def test_estate_containers_table_has_rows(self):
+        """Container table should have the illustrative rows."""
+        app = _make_app()
+        with patch.object(app, "_load_catalog"):
+            async with app.run_test(size=(120, 40)) as pilot:
+                t = app.query_one("#containers-table", DataTable)
+                assert t.row_count == 4  # vllm-qwen + open-webui + litellm + qdrant
+
+    @pytest.mark.asyncio
+    async def test_validate_run_pane_nodes(self):
+        """Validate Run tab has ladder and extras sections."""
+        app = _make_app()
+        with patch.object(app, "_load_catalog"):
+            async with app.run_test(size=(120, 40)) as pilot:
+                app.query_one("#validate-run-pane", ValidateRunPane)
+                app.query_one("#run-ladder")
+                app.query_one("#run-extras")
+                app.query_one("#run-output")
+
+    @pytest.mark.asyncio
+    async def test_validate_doctor_pane_nodes(self):
+        """Validate Doctor tab has health, estate, and profile cards."""
+        app = _make_app()
+        with patch.object(app, "_load_catalog"):
+            async with app.run_test(size=(120, 40)) as pilot:
+                app.query_one("#validate-doctor-pane", ValidateDoctorPane)
+                app.query_one("#doctor-card-health")
+                app.query_one("#doctor-card-estate")
+                app.query_one("#doctor-card-profile")
+
+    @pytest.mark.asyncio
+    async def test_validate_benchmarks_pane_nodes(self):
+        """Validate Benchmarks tab has a DataTable with rows."""
+        app = _make_app()
+        with patch.object(app, "_load_catalog"):
+            async with app.run_test(size=(120, 40)) as pilot:
+                app.query_one("#validate-benchmarks-pane", ValidateBenchmarksPane)
+                t = app.query_one("#bench-table", DataTable)
+                assert t.row_count == 4  # qwen27b, beellama, gemma31b, qwen35b
+
+    @pytest.mark.asyncio
+    async def test_validate_evidence_pane_nodes(self):
+        """Validate Evidence tab has the evidence list."""
+        app = _make_app()
+        with patch.object(app, "_load_catalog"):
+            async with app.run_test(size=(120, 40)) as pilot:
+                app.query_one("#validate-evidence-pane", ValidateEvidencePane)
+                app.query_one("#evidence-list")
+
+    @pytest.mark.asyncio
+    async def test_catalog_action_hint_exists(self):
+        """Catalog action hint bar is present below the table."""
+        app = _make_app()
+        with patch.object(app, "_load_catalog"):
+            async with app.run_test(size=(120, 40)) as pilot:
+                app.query_one("#catalog-hint", Label)
