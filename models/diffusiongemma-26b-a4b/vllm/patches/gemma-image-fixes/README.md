@@ -25,19 +25,20 @@ context, which upstream's gemma parsers were never exercised against). The compo
 Validated live on 2× RTX 3090 (2026-06-11): `:gemma` clean dies on the Marlin wall in
 warmup; `:gemma` + the marlin/TP mounts boots, serves coherent output, 262K, ~177/180 TPS
 typical (~1100 peak on low-entropy), 23.1 GB/card. The `gemma4_reasoning_parser.py` mount
-was added 2026-06-19 after reproducing the streaming `<|channel>thought` leak live. The
-`gemma4_tool_parser.py` mount was added 2026-06-19 after reproducing the empty-after-tool-calls
+was added 2026-06-19 after reproducing the streaming `<|channel>thought` leak live. See
+[`diffusionGemma_reasoning_stream_fix.md`](./diffusionGemma_reasoning_stream_fix.md).
+The `gemma4_tool_parser.py` mount was added 2026-06-19 after reproducing the empty-after-tool-calls
 turn live by replaying real Hermes `state.db` sessions: the empty rate at the worst real
 context dropped from **44% (reasoning off) / 31% (on) → 0% / 0%** (32/32 malformed calls
 recovered into proper tool calls), with canonical brace tool-calling unchanged (8/8 OK).
-See [`results-nvlink/diffusionGemma_empty_after_tools.md`](../../../../../../results-nvlink/diffusionGemma_empty_after_tools.md).
+See [`diffusionGemma_empty_after_tools.md`](./diffusionGemma_empty_after_tools.md).
 The **plain-quoted-value** half was added later the same day after the empties were fixed and
 the *next* symptom surfaced — `'arguments' is not valid JSON` / `Invalid domain format:
 '"media_player"'` from values that kept their literal quotes. Replaying the real failing
 session (`20260619_082023`) the embedded-quote rate on actual tool calls dropped from
 ~all-broken → **7/8 clean** (the residual being the model hallucinating/garbling tokens at
 depth, not the parser), empty-rate held at **0% / 0%**, canonical values stayed clean. See
-[`results-nvlink/diffusionGemma_tool_args_json.md`](../../../../../../results-nvlink/diffusionGemma_tool_args_json.md).
+[`diffusionGemma_tool_args_json.md`](./diffusionGemma_tool_args_json.md).
 
 ## Provenance + rebase
 
