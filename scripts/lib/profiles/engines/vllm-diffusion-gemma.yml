@@ -1,6 +1,6 @@
 schema_version: 1
 id: vllm-diffusion-gemma
-display_name: vLLM DiffusionGemma (official :gemma image + Ampere/TP fix-mounts)
+display_name: vLLM DiffusionGemma (official :gemma + Ampere/TP + #45588 engine backport)
 type: vllm
 stability: experimental
 install:
@@ -31,26 +31,24 @@ vendored_overlays:
     upstream_status: open
     upstream_merged_in_version: null
     local_status: vendored
-    delivery: site_package_overlay      # 3 files bind-mounted over the image's vllm pkg (wired_at: volumes)
+    delivery: site_package_overlay
     purpose: >-
-      The official `vllm/vllm-openai:gemma` image has the DiffusionGemma arch baked in
-      (stock build of dgemma branch 74b5964f), so we no longer sideload the model code.
-      But 3 fixes are NOT upstream (not in PR #45163) and so not in :gemma — vLLM
-      builds/tests on H100/B200 and their recipe is TP=1, so neither our Ampere fp8 path
-      nor our TP=2 path is exercised. The compose bind-mounts them from
-      models/diffusiongemma-26b-a4b/vllm/patches/gemma-image-fixes/:
-      marlin.py + marlin_utils_fp8.py = sm_86 fp8 Marlin sub-tile-K pad (:gemma clean
-      dies in warmup with "Invalid thread config … num_bits=8 … max_shared_mem=101376"
-      for K=352/1056); diffusion_gemma.py = TP-vocab soft-embed + :656 dtype fix (:gemma's
-      copy is the pristine branch file → TP=2 vocab bug). Eager-only (torch.compile works,
-      no gain). Validated live 2026-06-11: :gemma + these 3 mounts boots, serves, 262K,
-      ~177/180 TPS typical / ~1100 peak. Supersedes the former 123-file sideload overlay
-      on a stock nightly (same perf, 120 fewer files). REBASE on a :gemma re-pin (diff the
-      new image's marlin/diffusion_gemma vs these, re-apply the K-pad + TP-vocab deltas).
+      Ampere/TP bind-mounts (marlin K-pad ×2 + diffusion_gemma TP-vocab) + chat template
+      overlay. See models/diffusiongemma-26b-a4b/vllm/patches/gemma-image-fixes/README.md.
+  - id: dgemma-parser-engine-45588
+    pr_url: https://github.com/vllm-project/vllm/pull/45588
+    upstream_status: merged
+    upstream_merged_in_version: "76a373e"
+    local_status: vendored
+    delivery: entrypoint_invoke
+    purpose: >-
+      Boot-time backport of #45413+#45588 ParserEngine Gemma4 onto pinned :gemma (74b5964f).
+      Supersedes legacy gemma4_reasoning/tool_parser.py overlays. Drop when :gemma republish
+      includes #45588 or #45163 merges to a pinnable release.
 required_genesis: false
 notes: >-
   vLLM's first discrete-diffusion LM (DiffusionGemma 26B-A4B) on the V2 model runner
   (VLLM_USE_V2_MODEL_RUNNER=1), on the OFFICIAL vllm/vllm-openai:gemma image (digest-pinned)
-  + 3 vendored Ampere/TP fix-mounts. Boots+serves on 2x RTX 3090 (Ampere sm_86). gemma4
-  tool+reasoning parsers work. Eager-only. Experimental: still 3 vendored fixes + a
-  branch-not-main image + no soak. See the model's learnings + the fix dir README.
+  + Ampere/TP mounts + #45588 ParserEngine boot install + chat template overlay.
+  Boots+serves on 2x RTX 3090 (Ampere sm_86). Eager-only. Experimental: branch-not-main
+  image + boot-time parser backport. See the fix dir READMEs + UPSTREAM.md.

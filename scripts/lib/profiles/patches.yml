@@ -608,6 +608,8 @@ patches:
           dest: /usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/utils/marlin_utils_fp8.py
         - src: models/diffusiongemma-26b-a4b/vllm/patches/gemma-image-fixes/diffusion_gemma.py
           dest: /usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/diffusion_gemma.py
+        - src: models/diffusiongemma-26b-a4b/vllm/patches/gemma-image-fixes/tool_chat_template_gemma4.jinja
+          dest: /vllm-workspace/examples/tool_chat_template_gemma4.jinja
       mount_mode: ro
       wired_at: volumes
     drift_guard:
@@ -620,6 +622,37 @@ patches:
       ref: vllm-project/vllm#45163
       status: open
       drop_when: "the K-pad lands upstream (our #40361 / an Ampere Marlin fix) AND the TP-vocab fix merges into :gemma — then mount nothing"
+    status: verified
+
+  - id: dgemma-parser-engine-45588
+    model: [diffusiongemma-26b-a4b]
+    files:
+      - models/diffusiongemma-26b-a4b/vllm/patches/gemma-parser-engine-45588
+    load_bearing_when:
+      - composes:
+          - vllm/diffusiongemma-dual
+        reason: "Pinned :gemma (74b5964f) predates vLLM #45588 ParserEngine. Boot-time install.sh backports #45413+#45588 so gemma4 reasoning/tool parsing works on block-diffusion SSE chunking + agentic tool loops without legacy club parser overlays."
+        evidence: "models/diffusiongemma-26b-a4b/vllm/patches/gemma-parser-engine-45588/README.md"
+    delivery:
+      dockerfile_bake: false
+      entrypoint_invoke: true
+      genesis: false
+    delivery_gaps: []
+    delivery_mechanism: entrypoint_install
+    delivery_spec:
+      install_script: models/diffusiongemma-26b-a4b/vllm/patches/gemma-parser-engine-45588/install.sh
+      mount_dir: /etc/club3090/gemma-parser-engine-45588
+      wired_at: entrypoint
+    drift_guard:
+      kind: import-and-boot
+      check: "After install, vllm/reasoning/__init__.py registers gemma4_engine_reasoning_parser and vllm/parser/gemma4.py exists"
+      on_fail: hard-refuse
+    capability: diffusion-gemma-agentic-parsers
+    foundational: false
+    upstream:
+      ref: vllm-project/vllm#45588
+      status: merged
+      drop_when: ":gemma republish includes #45588 or #45163 merges to a pinnable release with ParserEngine baked in"
     status: verified
 
   - id: gemma4-unified-vision-unquant

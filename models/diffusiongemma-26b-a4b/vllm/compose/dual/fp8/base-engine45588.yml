@@ -1,0 +1,112 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     DiffusionGemma 26B-A4B (RedHatAI FP8-dynamic)
+#   Topology:  Dual 3090 (TP=2, NVLink auto-detected)
+#   Drafter:   none
+#   KV:        bf16
+#   Vision:    no
+#   Max ctx:   262144
+#   Genesis:   N/A
+#   Status:    🧪 Experimental — #45588 ParserEngine ablation compose (E1 base)
+#   Caveats:   Test-only variant: boot-time install of ParserEngine Gemma4 backport
+#              (#45413+#45588) on pinned :gemma 74b5964f. No club parser/template overlays
+#              (use ablation harness to add E2/E3 mounts). Not for production.
+#   Best for:  validating whether vLLM #45588 supersedes PR #443 parser overlays
+# ---------------------------------------------------------------------------
+# Ablation sibling: base.yml (production — engine + template + Ampere/TP).
+# This file is E1-only (engine backport, NO chat-template overlay).
+# ===========================================================================
+# Hardware metadata (parsed by scripts/preflight.sh):
+# Requires-min-vram-gb: 24
+# Engine-profile: vllm-diffusion-gemma
+# Requires-min-gpu-count: 2
+# Tensor-parallel: 2
+# Requires-sm: 8.0+
+services:
+  vllm-diffusiongemma-26b-a4b-fp8-tp2:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:gemma@sha256:9c719fc0c869092c7d0533f8357d6985a38d5ff03b20ffb6a4620c2b4806dd4b}
+    container_name: "${ESTATE_CONTAINER:-vllm-diffusiongemma-26b-a4b-fp8-tp2}"
+    restart: ${CLUB3090_RESTART:-unless-stopped}
+    ports:
+      - "${ESTATE_PORT:-${PORT:-8042}}:8000"
+    volumes:
+      - ${MODEL_DIR:-../../../../../../models-cache}:/root/.cache/huggingface
+      - ../../../patches/gemma-image-fixes/marlin.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/kernels/linear/scaled_mm/marlin.py:ro
+      - ../../../patches/gemma-image-fixes/marlin_utils_fp8.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/utils/marlin_utils_fp8.py:ro
+      - ../../../patches/gemma-image-fixes/diffusion_gemma.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/diffusion_gemma.py:ro
+      - ../../../patches/gemma-parser-engine-45588:/etc/club3090/gemma-parser-engine-45588:ro
+      - ../../../../../../scripts/detect_nvlink.sh:/etc/club3090/detect_nvlink.sh:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${ESTATE_GPUS:-${NVIDIA_VISIBLE_DEVICES:-all}}
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-${OFFLINE:-0}}
+      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-${OFFLINE:-0}}
+      - VLLM_USE_V2_MODEL_RUNNER=1
+      - TORCHDYNAMO_DISABLE=1
+      - TORCH_COMPILE_DISABLE=1
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - NVLINK_MODE=${NVLINK_MODE:-auto}
+      - NCCL_CUMEM_ENABLE=0
+      - NCCL_P2P_DISABLE=1
+      - VLLM_NO_USAGE_STATS=1
+      - OMP_NUM_THREADS=1
+      - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:512}
+      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+      - VLLM_ATTENTION_BACKEND=TRITON_ATTN
+      - TRITON_CACHE_DIR=/root/.triton/cache
+    shm_size: "16gb"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    entrypoint:
+      - bash
+      - -c
+      - |
+        bash /etc/club3090/gemma-parser-engine-45588/install.sh
+        source /etc/club3090/detect_nvlink.sh
+        if [ "$${_NVLINK_ENABLED:-0}" = "1" ]; then
+          exec vllm serve "$$@"
+        else
+          exec vllm serve --disable-custom-all-reduce "$$@"
+        fi
+      - --
+    command:
+      - /root/.cache/huggingface/diffusiongemma-26b-a4b-it-fp8-dynamic
+      - --served-model-name
+      - diffusiongemma-26b-a4b
+      - --trust-remote-code
+      - --tensor-parallel-size
+      - "${TP:-2}"
+      - --pipeline-parallel-size
+      - "${PP:-1}"
+      - --max-model-len
+      - "${MAX_MODEL_LEN:-262144}"
+      - --gpu-memory-utilization
+      - "${GPU_MEMORY_UTILIZATION:-0.82}"
+      - --max-num-seqs
+      - "${MAX_NUM_SEQS:-1}"
+      - --max-num-batched-tokens
+      - "${MAX_NUM_BATCHED_TOKENS:-2048}"
+      - --enforce-eager
+      - --kv-cache-dtype
+      - auto
+      - --attention-backend
+      - TRITON_ATTN
+      - --hf-overrides
+      - '{"diffusion_sampler":"entropy_bound","diffusion_entropy_bound":0.1}'
+      - --generation-config
+      - auto
+      - --override-generation-config
+      - '{"max_new_tokens":16384}'
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - gemma4
+      - --reasoning-parser
+      - gemma4
+      - --chat-template
+      - /vllm-workspace/examples/tool_chat_template_gemma4.jinja

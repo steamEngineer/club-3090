@@ -8,24 +8,11 @@
 #   Vision:    no (text diffusion)
 #   Max ctx:   262144 (NIAH retrieval validated to ~250K)
 #   Genesis:   N/A — Genesis is Qwen3-Next-specific
-#   Status:    🧪 Experimental — runs on the OFFICIAL vllm/vllm-openai:gemma image +
-#              6 vendored fix-mounts (3 Ampere/TP + 2 gemma4 parsers + chat template);
-#              under active validation, eager-only. Launch needs --force.
-#   Caveats:   Streaming reasoning leaked the literal <|channel>thought sentinel into
-#              the reasoning stream under the model's block-canvas SSE chunking (the
-#              "thoughts in chat" symptom on agent clients) — fixed by the vendored
-#              gemma4_reasoning_parser.py overlay (see UPSTREAM.md). Empty assistant turns
-#              after tool calls in long agentic loops: under degraded deep context the model
-#              emits a malformed paren-form tool call `call:fn(...)` that the brace-only
-#              gemma4 tool parser silently dropped to an empty turn; and it writes brace-body
-#              values with plain quotes `{domain: "media_player"}` (vs the `<|"|>` delimiter)
-#              that the stock parser passed through WITH the literal quotes -> "not valid JSON"
-#              / Invalid-domain errors. Both fixed by the vendored gemma4_tool_parser.py overlay
-#              (paren recovery + no-swallow fallback + quote-aware value strip; see UPSTREAM.md).
+#   Status:    🧪 Experimental — 6 vendored fix-mounts (reverted from engine-only migration
+#              2026-06-20 — #45588 breaks streaming tool_calls; see regression doc).
 #              History CoT replay: agent clients resend assistant reasoning_content each
 #              turn; stock tool_chat_template_gemma4.jinja re-templated it as <|channel>thought
-#              blocks (off-distribution, can stall tool loops) — fixed by vendored
-#              tool_chat_template_gemma4.jinja overlay (see UPSTREAM.md).
+#              blocks — fixed by vendored tool_chat_template_gemma4.jinja overlay (see UPSTREAM.md).
 #              At-depth tool-call misses + token garbling/hallucinated ids (~11K-38K ctx, #255)
 #              are a separate model/quant quality axis, not the parser.
 #   Quality:   8-pack 100/150 (67%) — toolcall 13/15 · instructfollow 13-15/15 ·
@@ -43,32 +30,19 @@
 #
 # DELIVERY: the OFFICIAL `vllm/vllm-openai:gemma` image (pushed 2026-06-10) has the
 # dLLM arch baked in (a stock vLLM build of the dgemma branch commit 74b5964f). We pin
-# it BY DIGEST (purge-resistant), then bind-mount 6 fix files that are NOT upstream:
+# it BY DIGEST (purge-resistant), then:
+#   • Boot-time install — vLLM #45413+#45588 ParserEngine backport for **reasoning only**
+#     (streaming `<|channel>` fix). Tool parsing stays on legacy gemma4_tool_parser.py
+#     mount — engine tool adapter leaks raw `<|tool_call>…<tool_call|>` in streaming.
 #   • marlin.py + marlin_utils_fp8.py — sm_86 fp8 Marlin sub-tile-K pad. Without them
 #     :gemma dies in warmup (Invalid thread config, K=352/1056, 99 KB shared mem).
 #   • diffusion_gemma.py — TP-vocab soft-embed + dtype fix (their recipe is TP=1, so
 #     the TP=2 vocab bug is unfixed upstream).
-#   • gemma4_reasoning_parser.py — streaming reasoning-parser fix: strips the leaked
-#     <|channel> start token that the base parser leaves in the first reasoning delta
-#     when a whole diffusion canvas (start token + thought, no end token yet) arrives
-#     in one SSE chunk. Without it, agent/chat clients see raw "<|channel>thought…" in
-#     the reasoning stream. Non-streaming was already clean. See UPSTREAM.md.
-#   • gemma4_tool_parser.py — malformed tool-call recovery + no-swallow fallback + quote-aware
-#     value strip. In long agentic loops the model degrades two ways: (a) emits paren-form
-#     `call:fn(domain='x')` instead of the canonical brace form → the stock brace-only parser
-#     matched nothing and silently dropped the whole <|tool_call>…<tool_call|> block → an EMPTY
-#     assistant turn; (b) keeps braces but writes values with plain quotes `{domain: "x"}`
-#     instead of the `<|"|>` delimiter → the stock bare-value path kept the quotes, emitting
-#     `"\"x\""` (literal quotes in the JSON arg) → "not valid JSON" / Invalid-domain errors.
-#     The overlay recovers the paren form (else surfaces raw text as content, never a silent
-#     empty) and parses plain-quoted values quote-aware (strip the quotes + any leaked <|"|>).
-#     The canonical <|"|> path is matched first, so well-formed calls are unchanged. See UPSTREAM.md.
 #   • tool_chat_template_gemma4.jinja — do NOT replay history chain-of-thought. Agent clients
 #     (Hermes, Cline) resend assistant `reasoning_content`; the stock template rendered it as
 #     `<|channel>thought` blocks in the prompt (off-distribution → narration + stop, no tool call).
 #     Overlay drops history CoT re-injection; current-turn thinking is generated fresh. See UPSTREAM.md.
-# See ../../../patches/gemma-image-fixes/README.md (provenance + rebase). This replaces
-# the former 123-file sideload overlay on a stock nightly — same perf, 120 fewer files.
+# See ../../../patches/gemma-image-fixes/README.md (Ampere/TP + template provenance).
 #
 # gemma4 tool + reasoning parsers WORK (it's gemma4-based) — mirrored from the
 # gemma-4-26b-a4b compose. Tool requests http_error WITHOUT --enable-auto-tool-choice;
@@ -83,7 +57,7 @@
 # Streaming note: SSE delivers a whole 256-tok canvas as ~1 chunk (block-parallel decode),
 # not token-by-token — verify-full's per-token streaming check flags this; it's expected.
 #
-# Engine: NO build step, NO sideload script. Pinned official image + 3 mounts. Just
+# Engine: pinned official image + boot-time ParserEngine install + 4 bind-mounts.
 # `docker compose up` (or switch.sh --force / launch.sh).
 # ===========================================================================
 # Hardware metadata (parsed by scripts/preflight.sh):
@@ -101,11 +75,9 @@ services:
       - "${ESTATE_PORT:-${PORT:-8042}}:8000"
     volumes:
       - ${MODEL_DIR:-../../../../../../models-cache}:/root/.cache/huggingface
-      # 6 fix-mounts over the official :gemma image (NOT upstream —
-      # see ../../../patches/gemma-image-fixes/README.md). marlin.py + marlin_utils_fp8.py
-      # = sm_86 fp8 Marlin K-pad; diffusion_gemma.py = TP-vocab soft-embed + dtype fix;
-      # gemma4_reasoning_parser.py + gemma4_tool_parser.py = parser overlays (see UPSTREAM.md);
-      # tool_chat_template_gemma4.jinja = strip history CoT replay before templating.
+      # 5 fix-mounts (legacy reasoning + tool parsers + Ampere/TP + template).
+      # Engine boot install DISABLED — #45588 reasoning engine breaks streaming tool
+      # extraction even with legacy tool parser mounted (see diffusionGemma_streaming_tool_regression.md).
       - ../../../patches/gemma-image-fixes/marlin.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/kernels/linear/scaled_mm/marlin.py:ro
       - ../../../patches/gemma-image-fixes/marlin_utils_fp8.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/utils/marlin_utils_fp8.py:ro
       - ../../../patches/gemma-image-fixes/diffusion_gemma.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/diffusion_gemma.py:ro
@@ -150,10 +122,6 @@ services:
       - bash
       - -c
       - |
-        # NVLink auto-detect: detect_nvlink.sh sets the NCCL env + _NVLINK_ENABLED;
-        # vLLM custom all-reduce is ON for NVLink/P2P, OFF (--disable-custom-all-reduce)
-        # for PCIe. $$ escapes $ so Compose v5.1+ passes the bash through verbatim — an
-        # un-escaped _NVLINK_ENABLED ref would be interpolated at parse time → forced to 0.
         source /etc/club3090/detect_nvlink.sh
         if [ "$${_NVLINK_ENABLED:-0}" = "1" ]; then
           exec vllm serve "$$@"
