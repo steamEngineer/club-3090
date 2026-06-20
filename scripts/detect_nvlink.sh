@@ -70,8 +70,19 @@ esac
 if [ "$_NVLINK_ENABLED" -eq 1 ]; then
   export NCCL_P2P_LEVEL="${_P2P_LEVEL:-NVL}"
   unset NCCL_P2P_DISABLE 2>/dev/null || true
-  export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-max_split_size_mb:512}"
-  echo "[nvlink] P2P ENABLED — NCCL_P2P_LEVEL=$NCCL_P2P_LEVEL, custom all-reduce ON, expandable_segments OFF"
+  # custom all-reduce is ON here. expandable_segments backs allocations with a
+  # cuMemMap VA range, and cudaIpcGetMemHandle on that range fails during graph-
+  # buffer registration (custom_all_reduce.cuh "invalid argument") — so it MUST
+  # be off on this path. Dual composes inject
+  # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,... for the PCIe path, so a
+  # plain ${VAR:-default} would keep that crashing value. Strip ONLY the
+  # expandable_segments token and preserve any other knobs the user set
+  # (max_split_size_mb, garbage_collection_threshold, ...). See docs/UPSTREAM.md.
+  _alloc="${PYTORCH_CUDA_ALLOC_CONF:-max_split_size_mb:512}"
+  _alloc="$(printf '%s' "$_alloc" | sed -E 's/(^|,)expandable_segments:[^,]*//g; s/^,+//; s/,+$//; s/,+/,/g')"
+  [ -n "$_alloc" ] || _alloc="max_split_size_mb:512"
+  export PYTORCH_CUDA_ALLOC_CONF="$_alloc"
+  echo "[nvlink] P2P ENABLED — NCCL_P2P_LEVEL=$NCCL_P2P_LEVEL, custom all-reduce ON, expandable_segments stripped (PYTORCH_CUDA_ALLOC_CONF=$PYTORCH_CUDA_ALLOC_CONF)"
 else
   export NCCL_P2P_DISABLE=1
   unset NCCL_P2P_LEVEL 2>/dev/null || true
